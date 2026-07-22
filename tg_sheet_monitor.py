@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.6"
+APP_VERSION = "2026-07-22.7"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -37,11 +37,19 @@ DEFAULT_NOTIFY_INITIAL = env_bool("SHEET_MONITOR_NOTIFY_INITIAL", False)
 DEFAULT_STARTUP_MESSAGE = env_bool("SHEET_MONITOR_STARTUP_MESSAGE", False)
 DEFAULT_MACOS_NOTIFICATIONS = env_bool("SHEET_MONITOR_MACOS_NOTIFICATIONS", True)
 DEFAULT_ADMIN_BUTTONS = env_bool("SHEET_MONITOR_ADMIN_BUTTONS", True)
+DEFAULT_PLAQUE_FORM = env_bool("PLAQUE_FORM_ENABLED", True)
 USER_AGENT = "tg-pushes-ts26-sheet-monitor/1.0"
 MAX_CHANGE_MESSAGES = 12
 MAX_MACOS_BODY_LENGTH = 220
 TELEGRAM_PARSE_MODE = "HTML"
 DIFF_BOUNDARY_CHARS = " \t,.;:!?-–—()[]{}«»\"'"
+PLAQUE_SPREADSHEET_ID = os.environ.get("PLAQUE_SPREADSHEET_ID", "1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js")
+PLAQUE_WORKSHEET_GID = int(os.environ.get("PLAQUE_WORKSHEET_GID", "1399617264"))
+PLAQUE_START_ROW = int(os.environ.get("PLAQUE_START_ROW", "280"))
+PLAQUE_NAME_COL = int(os.environ.get("PLAQUE_NAME_COL", "1"))
+PLAQUE_POSITION_COL = int(os.environ.get("PLAQUE_POSITION_COL", "2"))
+PLAQUE_NOTE_COL = int(os.environ.get("PLAQUE_NOTE_COL", "5"))
+PLAQUE_NOTE_TEXT = os.environ.get("PLAQUE_NOTE_TEXT", "<-- добавлено через ТГ бота")
 KEY_COLUMN_CANDIDATES = (
     "фио",
     "ф.и.о.",
@@ -309,6 +317,14 @@ def is_admin_chat_id(chat_id):
     return str(chat_id).strip() in admin_chat_ids()
 
 
+def known_service_chat_ids(sheets):
+    known = set(admin_chat_ids())
+    known.update(default_chat_ids())
+    for sheet in sheets:
+        known.update(recipient_chat_ids(sheet))
+    return {str(item).strip() for item in known if str(item).strip()}
+
+
 def send_telegram(args, title, message, subtitle="", url="", sheet=None):
     if args.no_telegram:
         log("Telegram выключен: {} - {}".format(title, message))
@@ -521,12 +537,37 @@ def admin_keyboard():
     }
 
 
+def plaque_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "Добавить новую плашку", "callback_data": "plq:start"}],
+        ]
+    }
+
+
+def plaque_confirm_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "Отправить в таблицу", "callback_data": "plq:confirm"}],
+            [
+                {"text": "Изменить имя", "callback_data": "plq:edit_name"},
+                {"text": "Изменить должность", "callback_data": "plq:edit_position"},
+            ],
+            [{"text": "Отменить", "callback_data": "plq:cancel"}],
+        ]
+    }
+
+
 def send_admin_message(args, chat_id, title, message, reply_markup=None):
     send_telegram_to_chat_ids(args, [str(chat_id)], title, message, reply_markup=reply_markup)
 
 
+def send_plain_chat_message(args, chat_id, title, message, reply_markup=None):
+    send_telegram_to_chat_ids(args, [str(chat_id)], title, message, reply_markup=reply_markup)
+
+
 def answer_callback(args, callback_id, text="Готово"):
-    if not callback_id:
+    if args.no_telegram or not callback_id:
         return
     try:
         telegram_request(get_required_telegram_token(), "answerCallbackQuery", {"callback_query_id": callback_id, "text": text}, args.timeout)
@@ -557,6 +598,7 @@ def status_report(args, sheets, state):
         "Интервал: {} сек.".format(args.interval),
         "Длительность: {} сек.".format(args.duration) if args.duration else "Длительность: без ограничения",
         "Админ-кнопки: {}".format("включены" if not args.no_admin_buttons else "выключены"),
+        "Форма плашек: {}".format("включена" if not args.no_plaque_form else "выключена"),
     ]
     for sheet in sheets:
         saved = state.get(sheet_key(sheet), {})
@@ -582,11 +624,15 @@ def send_test_to_sheet(args, chat_id, sheet):
 
 
 def handle_admin_callback(args, sheets, state, callback):
+    if args.no_admin_buttons:
+        return False
     callback_id = callback.get("id")
     message = callback.get("message") or {}
     chat = message.get("chat") or {}
     chat_id = chat.get("id") or (callback.get("from") or {}).get("id")
     data = callback.get("data") or ""
+    if not data.startswith("dbg:"):
+        return False
     if not is_admin_chat_id(chat_id):
         answer_callback(args, callback_id, "Нет доступа")
         return False
@@ -611,6 +657,8 @@ def handle_admin_callback(args, sheets, state, callback):
 
 
 def handle_admin_message(args, sheets, state, message):
+    if args.no_admin_buttons:
+        return False
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
     text = normalize_space(message.get("text") or "")
@@ -639,8 +687,236 @@ def handle_admin_message(args, sheets, state, message):
     return True
 
 
+def plaque_sessions(state):
+    sessions = state.setdefault("_plaque_sessions", {})
+    if not isinstance(sessions, dict):
+        state["_plaque_sessions"] = {}
+    return state["_plaque_sessions"]
+
+
+def plaque_session(state, chat_id):
+    return plaque_sessions(state).setdefault(str(chat_id), {})
+
+
+def clear_plaque_session(state, chat_id):
+    plaque_sessions(state).pop(str(chat_id), None)
+
+
+def normalize_person_name(value):
+    return normalize_space(value)
+
+
+def normalize_person_key(value):
+    return normalize_person_name(value).casefold()
+
+
+def validate_person_name(value):
+    text = normalize_person_name(value)
+    if len(text.split()) < 2:
+        raise ConfigError("Напишите имя в формате «Фамилия Имя».")
+    if len(text) > 120:
+        raise ConfigError("Имя слишком длинное, сократите до 120 символов.")
+    return text
+
+
+def validate_position(value):
+    text = normalize_space(value)
+    if not text:
+        raise ConfigError("Должность не должна быть пустой.")
+    if len(text) > 300:
+        raise ConfigError("Должность слишком длинная, сократите до 300 символов.")
+    return text
+
+
+def send_plaque_start(args, chat_id):
+    message = "Здесь можно добавить или обновить плашку для моушена.\n\nБот попросит «Фамилия Имя» и «Должность», затем покажет подтверждение перед записью в таблицу."
+    send_plain_chat_message(args, chat_id, "TS26: плашка", message, reply_markup=plaque_keyboard())
+
+
+def ask_plaque_name(args, state, chat_id):
+    plaque_session(state, chat_id).update({"step": "name"})
+    send_plain_chat_message(args, chat_id, "TS26: новая плашка", "Введите имя в формате:\nФамилия Имя")
+
+
+def ask_plaque_position(args, state, chat_id):
+    plaque_session(state, chat_id).update({"step": "position"})
+    send_plain_chat_message(args, chat_id, "TS26: новая плашка", "Введите должность для плашки.")
+
+
+def send_plaque_confirmation(args, state, chat_id):
+    session = plaque_session(state, chat_id)
+    name = session.get("name", "")
+    position = session.get("position", "")
+    message = "Проверьте перед отправкой:\n\nФИО: {}\nДолжность: {}\n\nПосле подтверждения бот добавит или обновит строку в листе «Моушен».".format(name, position)
+    session["step"] = "confirm"
+    send_plain_chat_message(args, chat_id, "TS26: проверьте плашку", message, reply_markup=plaque_confirm_keyboard())
+
+
+def get_google_client():
+    credentials_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    credentials_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+    if not credentials_json and not credentials_file:
+        raise ConfigError("Для записи в Google Sheets задайте GOOGLE_SERVICE_ACCOUNT_JSON или GOOGLE_SERVICE_ACCOUNT_FILE.")
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+    except ImportError as exc:
+        raise ConfigError("Не установлены зависимости для Google Sheets. Проверьте requirements.txt на хостинге: {}".format(exc))
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    if credentials_json:
+        try:
+            info = json.loads(credentials_json)
+        except ValueError as exc:
+            raise ConfigError("GOOGLE_SERVICE_ACCOUNT_JSON не похож на JSON: {}".format(exc))
+        credentials = Credentials.from_service_account_info(info, scopes=scopes)
+    else:
+        credentials = Credentials.from_service_account_file(credentials_file, scopes=scopes)
+    return gspread.authorize(credentials)
+
+
+def get_plaque_worksheet():
+    client = get_google_client()
+    spreadsheet = client.open_by_key(PLAQUE_SPREADSHEET_ID)
+    for worksheet in spreadsheet.worksheets():
+        if worksheet.id == PLAQUE_WORKSHEET_GID:
+            return worksheet
+    raise ConfigError("Не найден лист с gid={}".format(PLAQUE_WORKSHEET_GID))
+
+
+def find_plaque_row(values, name):
+    wanted = normalize_person_key(name)
+    first_empty = None
+    for offset, row in enumerate(values[PLAQUE_START_ROW - 1 :], start=PLAQUE_START_ROW):
+        current_name = row[PLAQUE_NAME_COL - 1] if len(row) >= PLAQUE_NAME_COL else ""
+        current_position = row[PLAQUE_POSITION_COL - 1] if len(row) >= PLAQUE_POSITION_COL else ""
+        if normalize_person_key(current_name) == wanted:
+            return offset, "updated"
+        if first_empty is None and not normalize_space(current_name) and not normalize_space(current_position):
+            first_empty = offset
+    if first_empty is not None:
+        return first_empty, "created"
+    return max(PLAQUE_START_ROW, len(values) + 1), "created"
+
+
+def column_letter(index):
+    if index < 1:
+        raise ConfigError("Номер колонки должен быть больше 0.")
+    letters = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def write_plaque_to_sheet(name, position):
+    worksheet = get_plaque_worksheet()
+    values = worksheet.get_all_values()
+    row_index, action = find_plaque_row(values, name)
+    updates = [
+        {"range": "{}{}".format(column_letter(PLAQUE_NAME_COL), row_index), "values": [[name]]},
+        {"range": "{}{}".format(column_letter(PLAQUE_POSITION_COL), row_index), "values": [[position]]},
+        {"range": "{}{}".format(column_letter(PLAQUE_NOTE_COL), row_index), "values": [[PLAQUE_NOTE_TEXT]]},
+    ]
+    worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+    return {"row": row_index, "action": action}
+
+
+def confirm_plaque(args, state, chat_id):
+    session = plaque_session(state, chat_id)
+    name = session.get("name")
+    position = session.get("position")
+    if not name or not position:
+        ask_plaque_name(args, state, chat_id)
+        return
+    result = write_plaque_to_sheet(name, position)
+    clear_plaque_session(state, chat_id)
+    action_text = "обновлена" if result["action"] == "updated" else "добавлена"
+    message = "Плашка {}.\nСтрока: {}\nФИО: {}\nДолжность: {}".format(action_text, result["row"], name, position)
+    send_plain_chat_message(args, chat_id, "TS26: готово", message)
+    for admin_id in admin_chat_ids():
+        if str(admin_id) != str(chat_id):
+            try:
+                send_plain_chat_message(args, admin_id, "TS26: плашка через бота", message)
+            except (MonitorError, ConfigError) as exc:
+                log("Не удалось уведомить админа о плашке: {}".format(exc))
+
+
+def handle_plaque_callback(args, sheets, state, callback):
+    if args.no_plaque_form:
+        return False
+    callback_id = callback.get("id")
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id") or (callback.get("from") or {}).get("id")
+    data = callback.get("data") or ""
+    if not data.startswith("plq:"):
+        return False
+    if is_admin_chat_id(chat_id) or str(chat_id) in known_service_chat_ids(sheets):
+        answer_callback(args, callback_id, "Форма доступна новым пользователям")
+        return True
+    answer_callback(args, callback_id)
+    if data == "plq:start":
+        ask_plaque_name(args, state, chat_id)
+    elif data == "plq:confirm":
+        try:
+            confirm_plaque(args, state, chat_id)
+        except (MonitorError, ConfigError) as exc:
+            send_plain_chat_message(args, chat_id, "TS26: ошибка записи", str(exc), reply_markup=plaque_confirm_keyboard())
+    elif data == "plq:edit_name":
+        ask_plaque_name(args, state, chat_id)
+    elif data == "plq:edit_position":
+        ask_plaque_position(args, state, chat_id)
+    elif data == "plq:cancel":
+        clear_plaque_session(state, chat_id)
+        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=plaque_keyboard())
+    return True
+
+
+def handle_plaque_message(args, sheets, state, message):
+    if args.no_plaque_form:
+        return False
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    text = normalize_space(message.get("text") or "")
+    if not chat_id or not text:
+        return False
+    if is_admin_chat_id(chat_id) or str(chat_id) in known_service_chat_ids(sheets):
+        return False
+    session = plaque_sessions(state).get(str(chat_id), {})
+    command = text.split()[0].split("@", 1)[0].lower() if text.startswith("/") else ""
+    if command in {"/start", "/add", "/plaque"}:
+        clear_plaque_session(state, chat_id)
+        send_plaque_start(args, chat_id)
+        return True
+    if command == "/cancel":
+        clear_plaque_session(state, chat_id)
+        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=plaque_keyboard())
+        return True
+    step = session.get("step")
+    if step == "name":
+        try:
+            session["name"] = validate_person_name(text)
+        except ConfigError as exc:
+            send_plain_chat_message(args, chat_id, "TS26: проверьте имя", str(exc))
+            return True
+        ask_plaque_position(args, state, chat_id)
+        return True
+    if step == "position":
+        try:
+            session["position"] = validate_position(text)
+        except ConfigError as exc:
+            send_plain_chat_message(args, chat_id, "TS26: проверьте должность", str(exc))
+            return True
+        send_plaque_confirmation(args, state, chat_id)
+        return True
+    if text.startswith("/"):
+        send_plaque_start(args, chat_id)
+        return True
+    return False
+
+
 def poll_admin_updates(args, sheets, state):
-    if args.no_admin_buttons or args.no_telegram:
+    if (args.no_admin_buttons and args.no_plaque_form) or args.no_telegram:
         return False
     token = get_required_telegram_token()
     payload = {"timeout": 0, "allowed_updates": json.dumps(["message", "callback_query"])}
@@ -661,9 +937,13 @@ def poll_admin_updates(args, sheets, state):
             changed = True
         try:
             if "callback_query" in update:
-                changed = handle_admin_callback(args, sheets, state, update["callback_query"]) or changed
+                callback = update["callback_query"]
+                changed = handle_admin_callback(args, sheets, state, callback) or changed
+                changed = handle_plaque_callback(args, sheets, state, callback) or changed
             elif "message" in update:
-                changed = handle_admin_message(args, sheets, state, update["message"]) or changed
+                message = update["message"]
+                changed = handle_admin_message(args, sheets, state, message) or changed
+                changed = handle_plaque_message(args, sheets, state, message) or changed
         except (MonitorError, ConfigError) as exc:
             log("Ошибка обработки Telegram-команды: {}".format(exc))
     return changed
@@ -936,6 +1216,7 @@ def build_parser():
     parser.add_argument("--print-chat-ids", action="store_true", help="Показать chat_id из последних сообщений боту и выйти.")
     parser.add_argument("--no-telegram", action="store_true", help="Не отправлять Telegram-сообщения, только писать лог.")
     parser.add_argument("--no-admin-buttons", action="store_true", default=not DEFAULT_ADMIN_BUTTONS, help="Не читать Telegram-команды и не показывать debug-кнопки.")
+    parser.add_argument("--no-plaque-form", action="store_true", default=not DEFAULT_PLAQUE_FORM, help="Отключить форму добавления плашек для обычных пользователей.")
     parser.add_argument("--no-macos-notifications", action="store_true", default=not DEFAULT_MACOS_NOTIFICATIONS, help="Не показывать системные уведомления macOS.")
     parser.add_argument("--no-notifications", action="store_true", help="Не отправлять ни Telegram, ни системные уведомления macOS.")
     parser.add_argument("--quiet", action="store_true", help="Не писать в лог проверки без изменений.")

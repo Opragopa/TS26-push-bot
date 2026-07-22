@@ -1,1 +1,2 @@
-# This bot uses only the Python standard library.
+gspread==6.1.4
+google-auth==2.32.0

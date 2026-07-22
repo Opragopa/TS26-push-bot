@@ -156,6 +156,8 @@ python3 tg_sheet_monitor.py --once --no-telegram
    TELEGRAM_BOT_TOKEN=ваш_токен_от_BotFather
    TELEGRAM_CHAT_ID=ваш_основной_chat_id
    TELEGRAM_ADMIN_CHAT_IDS=ваш_основной_chat_id
+   GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+   PLAQUE_FORM_ENABLED=true
    SHEET_MONITOR_INTERVAL=120
    SHEET_MONITOR_DURATION_SECONDS=0
    SHEET_MONITOR_DATA_DIR=data
@@ -203,6 +205,55 @@ TELEGRAM_ADMIN_CHAT_IDS=397481603
 ```
 
 Чтобы проверить второго человека, нажмите `Тест Контент-план`. Если он не получил сообщение, в ответ админу придет ошибка Telegram. Самая частая причина: человек еще ни разу не написал боту личное сообщение.
+
+## Форма добавления плашек
+
+Для пользователей, которые не входят в уже заданные `chat_id` админов и получателей уведомлений, `/start` открывает форму добавления плашки.
+
+Сценарий:
+
+1. Пользователь нажимает `/start`.
+2. Бот предлагает `Добавить новую плашку`.
+3. Пользователь вводит `Фамилия Имя`.
+4. Пользователь вводит `Должность`.
+5. Бот показывает подтверждение `Проверьте перед отправкой`.
+6. Только после кнопки `Отправить в таблицу` бот пишет данные в Google Sheet.
+
+Запись идет в таблицу:
+
+```text
+https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=1399617264
+```
+
+Лист выбирается по `gid=1399617264` (`Моушен`). Бот ищет имя начиная со строки `280`:
+
+- если такое `Фамилия Имя` уже есть в колонке `A`, обновляет эту строку;
+- если имени нет, пишет в первую свободную строку начиная с `280`;
+- в `A` пишет имя, в `B` должность, в `E` пометку `<-- добавлено через ТГ бота`.
+
+Для записи в Google Sheets нужен сервисный аккаунт Google:
+
+1. Создайте service account в Google Cloud.
+2. Скачайте JSON-ключ.
+3. Расшарьте Google Sheet на email сервисного аккаунта с правом `Редактор`.
+4. На Bothost добавьте весь JSON ключ одной переменной:
+
+   ```text
+   GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"..."}
+   ```
+
+Настройки формы можно менять переменными:
+
+```text
+PLAQUE_FORM_ENABLED=true
+PLAQUE_SPREADSHEET_ID=1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js
+PLAQUE_WORKSHEET_GID=1399617264
+PLAQUE_START_ROW=280
+PLAQUE_NAME_COL=1
+PLAQUE_POSITION_COL=2
+PLAQUE_NOTE_COL=5
+PLAQUE_NOTE_TEXT=<-- добавлено через ТГ бота
+```
 
 Для теста доставки без изменения таблиц добавьте в Bothost переменную:
 
@@ -258,6 +309,7 @@ python3 tg_sheet_monitor.py --help
 - `--print-chat-ids` - вывести `chat_id` из последних сообщений боту.
 - `--no-telegram` - только логировать, не отправлять сообщения.
 - `--no-admin-buttons` - отключить чтение Telegram-команд и debug-кнопки.
+- `--no-plaque-form` - отключить форму добавления плашек для обычных пользователей.
 
 ## Автозапуск на macOS
 
