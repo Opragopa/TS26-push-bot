@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.10"
+APP_VERSION = "2026-07-22.11"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -543,16 +543,26 @@ def admin_keyboard():
             ],
             [
                 {"text": "Тест старта", "callback_data": "dbg:test:startup"},
+                {"text": "Google-доступ", "callback_data": "dbg:google_access"},
+            ],
+            [
                 {"text": "Превью формы", "callback_data": "dbg:preview_plaque"},
+                {"text": "Режим пользователя", "callback_data": "dbg:user_mode"},
             ],
         ]
     }
 
 
 def plaque_keyboard():
+    rows = [[{"text": "Добавить новую плашку", "callback_data": "plq:start"}]]
+    return {"inline_keyboard": rows}
+
+
+def plaque_user_mode_keyboard():
     return {
         "inline_keyboard": [
             [{"text": "Добавить новую плашку", "callback_data": "plq:start"}],
+            [{"text": "Вернуться в админку", "callback_data": "plq:admin_panel"}],
         ]
     }
 
@@ -568,6 +578,12 @@ def plaque_confirm_keyboard():
             [{"text": "Отменить", "callback_data": "plq:cancel"}],
         ]
     }
+
+
+def plaque_confirm_user_mode_keyboard():
+    keyboard = plaque_confirm_keyboard()
+    keyboard["inline_keyboard"].append([{"text": "Вернуться в админку", "callback_data": "plq:admin_panel"}])
+    return keyboard
 
 
 def send_admin_message(args, chat_id, title, message, reply_markup=None):
@@ -605,12 +621,14 @@ def recipients_report(sheets):
 
 
 def status_report(args, sheets, state):
+    active_user_modes = len(user_mode_chats(state))
     lines = [
         "Версия: {}".format(APP_VERSION),
         "Интервал: {} сек.".format(args.interval),
         "Длительность: {} сек.".format(args.duration) if args.duration else "Длительность: без ограничения",
         "Админ-кнопки: {}".format("включены" if not args.no_admin_buttons else "выключены"),
         "Форма плашек: {}".format("включена" if not args.no_plaque_form else "выключена"),
+        "Пользовательский режим админов: {}".format(active_user_modes),
     ]
     for sheet in sheets:
         saved = state.get(sheet_key(sheet), {})
@@ -645,6 +663,36 @@ def send_plaque_preview(args, chat_id):
     send_plain_chat_message(args, chat_id, "TS26: готово", "После подтверждения пользователь увидит примерно так:\n\nПлашка добавлена.\nСтрока: 280\nФИО: Иванов Иван\nДолжность: директор подразделения", reply_markup=admin_keyboard())
 
 
+def send_user_mode_start(args, state, chat_id):
+    set_user_mode_chat(state, chat_id, True)
+    clear_plaque_session(state, chat_id)
+    send_admin_message(
+        args,
+        chat_id,
+        "TS26: режим пользователя",
+        "Теперь этот чат работает как обычный пользователь формы. Можно пройти сценарий полностью, включая запись в Google Sheet после подтверждения.\n\nЧтобы вернуться в debug-панель, нажмите кнопку или отправьте /debug.",
+    )
+    send_plaque_start(args, chat_id, state=state)
+
+
+def google_access_report():
+    auth_sources = []
+    for name in ("GOOGLE_SERVICE_ACCOUNT_JSON", "GOOGLE_SERVICE_ACCOUNT_FILE", "GOOGLE_OAUTH_USER_JSON", "GOOGLE_OAUTH_USER_FILE"):
+        if os.environ.get(name, "").strip():
+            auth_sources.append(name)
+    if not auth_sources:
+        raise ConfigError("Не найдены переменные GOOGLE_SERVICE_ACCOUNT_JSON/FILE или GOOGLE_OAUTH_USER_JSON/FILE.")
+    worksheet = get_plaque_worksheet()
+    title = getattr(worksheet, "title", "")
+    return "Google-доступ работает.\nАвторизация: {}\nТаблица: {}\nЛист: {} (gid={})\nСтартовая строка формы: {}".format(
+        ", ".join(auth_sources),
+        PLAQUE_SPREADSHEET_ID,
+        title or "без названия",
+        PLAQUE_WORKSHEET_GID,
+        PLAQUE_START_ROW,
+    )
+
+
 def handle_admin_callback(args, sheets, state, callback):
     if args.no_admin_buttons:
         return False
@@ -666,8 +714,16 @@ def handle_admin_callback(args, sheets, state, callback):
     elif data == "dbg:test:startup":
         send_startup_message(args, sheets)
         send_admin_message(args, chat_id, "TS26: тест старта", "Стартовое сообщение отправлено основным получателям.", reply_markup=admin_keyboard())
+    elif data == "dbg:google_access":
+        try:
+            report = google_access_report()
+            send_admin_message(args, chat_id, "TS26: Google-доступ", report, reply_markup=admin_keyboard())
+        except (MonitorError, ConfigError) as exc:
+            send_admin_message(args, chat_id, "TS26: ошибка Google-доступа", str(exc), reply_markup=admin_keyboard())
     elif data == "dbg:preview_plaque":
         send_plaque_preview(args, chat_id)
+    elif data == "dbg:user_mode":
+        send_user_mode_start(args, state, chat_id)
     elif data.startswith("dbg:test:"):
         label = data.split(":", 2)[2]
         sheet = find_sheet_by_label(sheets, label)
@@ -692,7 +748,12 @@ def handle_admin_message(args, sheets, state, message):
         log("Команда от не-админа: chat_id={}, text={}".format(chat_id, text))
         return False
     command = text.split()[0].split("@", 1)[0].lower()
+    if is_user_mode_chat(state, chat_id) and command in {"/start", "/add", "/plaque", "/cancel"}:
+        return False
     if command in {"/start", "/debug"}:
+        if is_user_mode_chat(state, chat_id):
+            set_user_mode_chat(state, chat_id, False)
+            clear_plaque_session(state, chat_id)
         send_debug_menu(args, chat_id, sheets, state)
     elif command == "/status":
         send_admin_message(args, chat_id, "TS26: статус", status_report(args, sheets, state), reply_markup=admin_keyboard())
@@ -700,6 +761,14 @@ def handle_admin_message(args, sheets, state, message):
         send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets), reply_markup=admin_keyboard())
     elif command == "/preview_user":
         send_plaque_preview(args, chat_id)
+    elif command in {"/user", "/user_mode", "/plaque_mode"}:
+        send_user_mode_start(args, state, chat_id)
+    elif command == "/google_access":
+        try:
+            report = google_access_report()
+            send_admin_message(args, chat_id, "TS26: Google-доступ", report, reply_markup=admin_keyboard())
+        except (MonitorError, ConfigError) as exc:
+            send_admin_message(args, chat_id, "TS26: ошибка Google-доступа", str(exc), reply_markup=admin_keyboard())
     elif command == "/test_content":
         sheet = find_sheet_by_label(sheets, "Контент-план")
         if sheet:
@@ -728,6 +797,31 @@ def clear_plaque_session(state, chat_id):
     plaque_sessions(state).pop(str(chat_id), None)
 
 
+def user_mode_chats(state):
+    chats = state.setdefault("_user_mode_chats", {})
+    if not isinstance(chats, dict):
+        state["_user_mode_chats"] = {}
+    return state["_user_mode_chats"]
+
+
+def is_user_mode_chat(state, chat_id):
+    return bool(user_mode_chats(state).get(str(chat_id)))
+
+
+def set_user_mode_chat(state, chat_id, enabled):
+    chats = user_mode_chats(state)
+    if enabled:
+        chats[str(chat_id)] = {"enabled_at": now_text()}
+    else:
+        chats.pop(str(chat_id), None)
+
+
+def can_use_plaque_form(sheets, state, chat_id):
+    if is_user_mode_chat(state, chat_id):
+        return True
+    return not (is_admin_chat_id(chat_id) or str(chat_id) in known_service_chat_ids(sheets))
+
+
 def normalize_person_name(value):
     return normalize_space(value)
 
@@ -754,9 +848,10 @@ def validate_position(value):
     return text
 
 
-def send_plaque_start(args, chat_id):
+def send_plaque_start(args, chat_id, state=None):
     message = "Здесь можно добавить или обновить плашку для моушена.\n\nБот попросит «Фамилия Имя» и «Должность», затем покажет подтверждение перед записью в таблицу."
-    send_plain_chat_message(args, chat_id, "TS26: плашка", message, reply_markup=plaque_keyboard())
+    keyboard = plaque_user_mode_keyboard() if state is not None and is_user_mode_chat(state, chat_id) else plaque_keyboard()
+    send_plain_chat_message(args, chat_id, "TS26: плашка", message, reply_markup=keyboard)
 
 
 def ask_plaque_name(args, state, chat_id):
@@ -775,7 +870,8 @@ def send_plaque_confirmation(args, state, chat_id):
     position = session.get("position", "")
     message = "Проверьте перед отправкой:\n\nФИО: {}\nДолжность: {}\n\nПосле подтверждения бот добавит или обновит строку в листе «Моушен».".format(name, position)
     session["step"] = "confirm"
-    send_plain_chat_message(args, chat_id, "TS26: проверьте плашку", message, reply_markup=plaque_confirm_keyboard())
+    keyboard = plaque_confirm_user_mode_keyboard() if is_user_mode_chat(state, chat_id) else plaque_confirm_keyboard()
+    send_plain_chat_message(args, chat_id, "TS26: проверьте плашку", message, reply_markup=keyboard)
 
 
 def get_google_client():
@@ -888,7 +984,13 @@ def handle_plaque_callback(args, sheets, state, callback):
     data = callback.get("data") or ""
     if not data.startswith("plq:"):
         return False
-    if is_admin_chat_id(chat_id) or str(chat_id) in known_service_chat_ids(sheets):
+    if data == "plq:admin_panel" and is_admin_chat_id(chat_id):
+        answer_callback(args, callback_id)
+        set_user_mode_chat(state, chat_id, False)
+        clear_plaque_session(state, chat_id)
+        send_debug_menu(args, chat_id, sheets, state)
+        return True
+    if not can_use_plaque_form(sheets, state, chat_id):
         answer_callback(args, callback_id, "Форма доступна новым пользователям")
         return True
     answer_callback(args, callback_id)
@@ -905,7 +1007,8 @@ def handle_plaque_callback(args, sheets, state, callback):
         ask_plaque_position(args, state, chat_id)
     elif data == "plq:cancel":
         clear_plaque_session(state, chat_id)
-        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=plaque_keyboard())
+        keyboard = plaque_user_mode_keyboard() if is_user_mode_chat(state, chat_id) else plaque_keyboard()
+        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=keyboard)
     return True
 
 
@@ -917,17 +1020,18 @@ def handle_plaque_message(args, sheets, state, message):
     text = normalize_space(message.get("text") or "")
     if not chat_id or not text:
         return False
-    if is_admin_chat_id(chat_id) or str(chat_id) in known_service_chat_ids(sheets):
+    if not can_use_plaque_form(sheets, state, chat_id):
         return False
     session = plaque_sessions(state).get(str(chat_id), {})
     command = text.split()[0].split("@", 1)[0].lower() if text.startswith("/") else ""
     if command in {"/start", "/add", "/plaque"}:
         clear_plaque_session(state, chat_id)
-        send_plaque_start(args, chat_id)
+        send_plaque_start(args, chat_id, state=state)
         return True
     if command == "/cancel":
         clear_plaque_session(state, chat_id)
-        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=plaque_keyboard())
+        keyboard = plaque_user_mode_keyboard() if is_user_mode_chat(state, chat_id) else plaque_keyboard()
+        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=keyboard)
         return True
     step = session.get("step")
     if step == "name":
@@ -947,7 +1051,7 @@ def handle_plaque_message(args, sheets, state, message):
         send_plaque_confirmation(args, state, chat_id)
         return True
     if text.startswith("/"):
-        send_plaque_start(args, chat_id)
+        send_plaque_start(args, chat_id, state=state)
         return True
     return False
 
