@@ -11,6 +11,14 @@
    curl "https://api.telegram.org/bot<ТОКЕН>/getUpdates"
    ```
 
+   Или используйте встроенную команду:
+
+   ```bash
+   python3 tg_sheet_monitor.py --print-chat-ids
+   ```
+
+   Важно: `chat_id` - это ID вашего личного чата, группы или канала, а не ID самого бота. Если указать ID бота, Telegram вернет ошибку `Forbidden: the bot can't send messages to the bot`.
+
 3. Скопируйте настройки:
 
    ```bash
@@ -39,6 +47,12 @@
 python3 tg_sheet_monitor.py --once --notify-initial
 ```
 
+Если нужно только проверить чтение таблиц без отправки сообщений:
+
+```bash
+python3 tg_sheet_monitor.py --once --no-telegram
+```
+
 ## Параметры
 
 ```bash
@@ -51,6 +65,7 @@ python3 tg_sheet_monitor.py --help
 - `--sheet "Название=https://docs.google.com/..."` - задать таблицы через CLI вместо `sheets.json`.
 - `--state state/sheet_state.json` - путь к файлу состояния.
 - `--quiet` - не печатать проверки без изменений.
+- `--print-chat-ids` - вывести `chat_id` из последних сообщений боту.
 - `--no-telegram` - только логировать, не отправлять сообщения.
 
 ## Автозапуск на macOS

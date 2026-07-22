@@ -188,14 +188,40 @@ def telegram_request(token, method, payload, timeout):
     return parsed
 
 
+def get_required_telegram_token():
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        raise ConfigError("Заполните TELEGRAM_BOT_TOKEN в .env или окружении.")
+    return token
+
+
+def print_chat_ids(args):
+    token = get_required_telegram_token()
+    data = telegram_request(token, "getUpdates", {}, args.timeout)
+    results = data.get("result") or []
+    if not results:
+        log("Telegram не вернул сообщений. Напишите боту любое сообщение и запустите команду еще раз.")
+        return
+    seen = set()
+    for item in results:
+        message = item.get("message") or item.get("edited_message") or item.get("channel_post") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        if chat_id is None or chat_id in seen:
+            continue
+        seen.add(chat_id)
+        title = chat.get("title") or chat.get("username") or "личный чат"
+        log("chat_id: {} ({})".format(chat_id, title))
+
+
 def send_telegram(args, title, message, subtitle="", url=""):
     if args.no_telegram:
         log("Telegram выключен: {} - {}".format(title, message))
         return
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    token = get_required_telegram_token()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        raise ConfigError("Заполните TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в .env или окружении.")
+    if not chat_id:
+        raise ConfigError("Заполните TELEGRAM_CHAT_ID в .env или окружении. Его можно узнать через --print-chat-ids.")
     lines = ["*{}*".format(telegram_escape(title))]
     if subtitle:
         lines.append(telegram_escape(subtitle))
@@ -209,6 +235,15 @@ def send_telegram(args, title, message, subtitle="", url=""):
         "disable_web_page_preview": "true" if env_bool("TELEGRAM_DISABLE_WEB_PAGE_PREVIEW", True) else "false",
     }
     telegram_request(token, "sendMessage", payload, args.timeout)
+
+
+def try_send_telegram(args, title, message, subtitle="", url=""):
+    try:
+        send_telegram(args, title, message, subtitle=subtitle, url=url)
+        return True
+    except (MonitorError, ConfigError) as exc:
+        log("Не удалось отправить Telegram-сообщение: {}".format(exc))
+        return False
 
 
 def telegram_escape(value):
@@ -233,11 +268,11 @@ def check_sheet(sheet, state, args):
         row_text = "строк: {} -> {}".format(old_rows, current["rows"]) if old_rows is not None else "строк: {}".format(current["rows"])
         message = "{}; размер: {} байт".format(row_text, current["bytes"])
         log("Обновление: {} ({})".format(label, message))
-        send_telegram(args, "Обновилась Google Sheet", message, subtitle=label, url=sheet["url"])
+        try_send_telegram(args, "Обновилась Google Sheet", message, subtitle=label, url=sheet["url"])
     elif not old_hash:
         log("Первый снимок: {} (строк: {}, {} байт)".format(label, current["rows"], current["bytes"]))
         if args.notify_initial:
-            send_telegram(args, "Монитор Google Sheets запущен", "Первый снимок сохранен; строк: {}".format(current["rows"]), subtitle=label, url=sheet["url"])
+            try_send_telegram(args, "Монитор Google Sheets запущен", "Первый снимок сохранен; строк: {}".format(current["rows"]), subtitle=label, url=sheet["url"])
     elif not args.quiet:
         log("Без изменений: {} (строк: {})".format(label, current["rows"]))
 
@@ -256,7 +291,7 @@ def check_all(sheets, state, args):
             message = str(exc)
             log("Ошибка: {} - {}".format(sheet["label"], message))
             if previous.get("error") != message:
-                send_telegram(args, "Ошибка монитора Google Sheets", message, subtitle=sheet["label"], url=sheet["url"])
+                try_send_telegram(args, "Ошибка монитора Google Sheets", message, subtitle=sheet["label"], url=sheet["url"])
             previous.update({
                 "label": sheet["label"],
                 "url": sheet["url"],
@@ -280,6 +315,7 @@ def build_parser():
     parser.add_argument("--env", default=".env", help="Файл с TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID.")
     parser.add_argument("--once", action="store_true", help="Проверить один раз и выйти.")
     parser.add_argument("--notify-initial", action="store_true", help="Отправить Telegram-сообщение при первом сохранении снимка.")
+    parser.add_argument("--print-chat-ids", action="store_true", help="Показать chat_id из последних сообщений боту и выйти.")
     parser.add_argument("--no-telegram", action="store_true", help="Не отправлять Telegram-сообщения, только писать лог.")
     parser.add_argument("--quiet", action="store_true", help="Не писать в лог проверки без изменений.")
     return parser
@@ -290,6 +326,9 @@ def main(argv=None):
     if args.interval < 15:
         raise SystemExit("Интервал меньше 15 секунд слишком агрессивен для Google Sheets.")
     load_dotenv(args.env)
+    if args.print_chat_ids:
+        print_chat_ids(args)
+        return
     sheets = load_sheets(args)
     if not sheets:
         raise SystemExit("Добавьте хотя бы одну таблицу в sheets.json или через --sheet.")
