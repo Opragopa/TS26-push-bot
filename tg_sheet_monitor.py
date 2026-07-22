@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.9"
+APP_VERSION = "2026-07-22.10"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -477,6 +477,17 @@ def render_telegram_body(message):
 
 
 def render_telegram_change_line(line):
+    grid_day_match = re.match(r"^(.+?): день «(.+?)», строка «(.+?)», колонка «(.+?)» - было «(.*?)», стало «(.*?)»\.$", line)
+    if grid_day_match:
+        _sheet, day_name, row_name, column_name, old_value, new_value = grid_day_match.groups()
+        return "• <b>День:</b> {}\n  <b>Строка:</b> {}\n  <b>Колонка:</b> {}\n  <b>Было:</b> {}\n  <b>Стало:</b> {}".format(
+            h(day_name),
+            h(row_name),
+            h(column_name),
+            underline_changed_value(old_value, new_value),
+            underline_changed_value(new_value, old_value),
+        )
+
     grid_match = re.match(r"^(.+?): строка «(.+?)», колонка «(.+?)» - было «(.*?)», стало «(.*?)»\.$", line)
     if grid_match:
         _sheet, row_name, column_name, old_value, new_value = grid_match.groups()
@@ -1034,6 +1045,14 @@ def row_identity(rows, headers, row_index, key_col):
     return ", ".join(filled) or "строка {}".format(row_index + 1)
 
 
+def day_context(rows, row_index):
+    for index in range(row_index, -1, -1):
+        text = cell(rows, index, 0)
+        if re.match(r"^ДЕНЬ\s+\d+\b", text, re.IGNORECASE):
+            return text
+    return ""
+
+
 def row_map(rows, header_index, key_col):
     result = {}
     fallback = []
@@ -1066,7 +1085,9 @@ def describe_cell_change(sheet_label, row_name, header, old_value, new_value):
     return "Изменено поле «{}» у {}: было «{}», стало «{}».".format(field, row_name, display_value(old_value), display_value(new_value))
 
 
-def describe_grid_change(sheet_label, row_name, header, old_value, new_value):
+def describe_grid_change(sheet_label, day_name, row_name, header, old_value, new_value):
+    if day_name:
+        return "{}: день «{}», строка «{}», колонка «{}» - было «{}», стало «{}».".format(sheet_label, day_name, row_name, header, display_value(old_value), display_value(new_value))
     return "{}: строка «{}», колонка «{}» - было «{}», стало «{}».".format(sheet_label, row_name, header, display_value(old_value), display_value(new_value))
 
 
@@ -1097,6 +1118,7 @@ def build_change_messages(sheet_label, previous_rows, current_rows):
         old_index = previous_by_key[key]
         new_index = current_by_key[key]
         row_name = row_identity(current_rows, headers, new_index, key_col)
+        day_name = day_context(current_rows, new_index)
         for col_index, header in enumerate(headers):
             old_value = cell(previous_rows, old_index, col_index)
             new_value = cell(current_rows, new_index, col_index)
@@ -1105,7 +1127,7 @@ def build_change_messages(sheet_label, previous_rows, current_rows):
             if people_table:
                 messages.append(describe_cell_change(sheet_label, row_name, header, old_value, new_value))
             else:
-                messages.append(describe_grid_change(sheet_label, row_name, header, old_value, new_value))
+                messages.append(describe_grid_change(sheet_label, day_name, row_name, header, old_value, new_value))
             if len(messages) >= MAX_CHANGE_MESSAGES:
                 return messages
 
@@ -1120,12 +1142,13 @@ def build_change_messages(sheet_label, previous_rows, current_rows):
         old_index = previous_fallback[index]
         new_index = current_fallback[index]
         row_name = row_identity(current_rows, headers, new_index, key_col)
+        day_name = day_context(current_rows, new_index)
         for col_index, header in enumerate(headers):
             old_value = cell(previous_rows, old_index, col_index)
             new_value = cell(current_rows, new_index, col_index)
             if old_value == new_value:
                 continue
-            messages.append(describe_grid_change(sheet_label, row_name, header, old_value, new_value))
+            messages.append(describe_grid_change(sheet_label, day_name, row_name, header, old_value, new_value))
             if len(messages) >= MAX_CHANGE_MESSAGES:
                 return messages
 
