@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.16"
+APP_VERSION = "2026-07-22.17"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -628,6 +628,9 @@ def admin_keyboard():
                 {"text": "Превью формы", "callback_data": "dbg:preview_plaque"},
                 {"text": "Режим пользователя", "callback_data": "dbg:user_mode"},
             ],
+            [
+                {"text": "Стартовый экран", "callback_data": "dbg:start_screen"},
+            ],
         ]
     }
 
@@ -759,9 +762,30 @@ def send_test_to_sheet(args, chat_id, sheet, state=None):
         send_admin_message(args, chat_id, "TS26: ошибка теста", "Таблица: {}\n{}".format(sheet["label"], exc), reply_markup=admin_keyboard())
 
 
+def start_screen_text(is_content_recipient=False):
+    lines = [
+        "Я бот TS26.",
+        "",
+        "Что умею:",
+        "• присылать уведомления об изменениях в Контент-плане;",
+        "• помочь добавить или обновить плашку для моушена;",
+        "• перед отправкой плашки показать проверку данных.",
+        "",
+        "Чтобы добавить плашку, нажмите кнопку ниже.",
+    ]
+    if is_content_recipient:
+        lines.extend(["", "Вы добавлены в уведомления Контент-плана."])
+    return "\n".join(lines)
+
+
+def send_start_screen(args, chat_id, state=None, is_content_recipient=False):
+    keyboard = plaque_user_mode_keyboard() if state is not None and is_user_mode_chat(state, chat_id) else plaque_keyboard()
+    send_plain_chat_message(args, chat_id, "TS26: старт", start_screen_text(is_content_recipient=is_content_recipient), reply_markup=keyboard)
+
+
 def send_plaque_preview(args, chat_id):
     send_admin_message(args, chat_id, "TS26: превью обычного пользователя", "Ниже бот покажет, как форму видит обычный пользователь. Это только превью: Google Sheet не изменится.")
-    send_plain_chat_message(args, chat_id, "TS26: плашка", "Здесь можно добавить или обновить плашку для моушена.\n\nБот попросит «Фамилия Имя» и «Должность», затем покажет подтверждение перед записью в таблицу.", reply_markup=plaque_keyboard())
+    send_start_screen(args, chat_id)
     send_plain_chat_message(args, chat_id, "TS26: новая плашка", "Введите имя в формате:\nФамилия Имя")
     send_plain_chat_message(args, chat_id, "TS26: новая плашка", "Введите должность для плашки.")
     preview_state = {"_plaque_sessions": {str(chat_id): {"name": "Иванов Иван", "position": "директор подразделения"}}}
@@ -830,6 +854,8 @@ def handle_admin_callback(args, sheets, state, callback):
             send_admin_message(args, chat_id, "TS26: ошибка Google-доступа", str(exc), reply_markup=admin_keyboard())
     elif data == "dbg:preview_plaque":
         send_plaque_preview(args, chat_id)
+    elif data == "dbg:start_screen":
+        send_start_screen(args, chat_id, state=state, is_content_recipient=str(chat_id) in content_plan_chat_ids(state))
     elif data == "dbg:user_mode":
         send_user_mode_start(args, state, chat_id)
     elif data.startswith("dbg:test:"):
@@ -894,6 +920,8 @@ def handle_admin_message(args, sheets, state, message):
                     send_admin_message(args, chat_id, "TS26: ошибка теста", "chat_id добавлен, но тестовое сообщение не отправилось:\n{}".format(exc), reply_markup=admin_keyboard())
     elif command == "/preview_user":
         send_plaque_preview(args, chat_id)
+    elif command == "/start_screen":
+        send_start_screen(args, chat_id, state=state, is_content_recipient=str(chat_id) in content_plan_chat_ids(state))
     elif command in {"/user", "/user_mode", "/plaque_mode"}:
         send_user_mode_start(args, state, chat_id)
     elif command == "/google_access":
@@ -984,7 +1012,7 @@ def validate_position(value):
 
 
 def send_plaque_start(args, chat_id, state=None):
-    message = "Здесь можно добавить или обновить плашку для моушена.\n\nБот попросит «Фамилия Имя» и «Должность», затем покажет подтверждение перед записью в таблицу."
+    message = "Бот попросит «Фамилия Имя» и «Должность», затем покажет подтверждение перед записью в таблицу."
     keyboard = plaque_user_mode_keyboard() if state is not None and is_user_mode_chat(state, chat_id) else plaque_keyboard()
     send_plain_chat_message(args, chat_id, "TS26: плашка", message, reply_markup=keyboard)
 
@@ -1253,7 +1281,11 @@ def handle_plaque_message(args, sheets, state, message):
         return False
     session = plaque_sessions(state).get(str(chat_id), {})
     command = text.split()[0].split("@", 1)[0].lower() if text.startswith("/") else ""
-    if command in {"/start", "/add", "/plaque"}:
+    if command == "/start":
+        clear_plaque_session(state, chat_id)
+        send_start_screen(args, chat_id, state=state, is_content_recipient=str(chat_id) in content_plan_chat_ids(state))
+        return True
+    if command in {"/add", "/plaque"}:
         clear_plaque_session(state, chat_id)
         send_plaque_start(args, chat_id, state=state)
         return True
