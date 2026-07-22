@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.12"
+APP_VERSION = "2026-07-22.13"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -45,6 +45,7 @@ TELEGRAM_PARSE_MODE = "HTML"
 DIFF_BOUNDARY_CHARS = " \t,.;:!?-–—()[]{}«»\"'"
 PLAQUE_SPREADSHEET_ID = os.environ.get("PLAQUE_SPREADSHEET_ID", "1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js")
 PLAQUE_WORKSHEET_GID = int(os.environ.get("PLAQUE_WORKSHEET_GID", "1399617264"))
+PLAQUE_WORKSHEET_TITLE = os.environ.get("PLAQUE_WORKSHEET_TITLE", "МОУШЕН")
 PLAQUE_START_ROW = int(os.environ.get("PLAQUE_START_ROW", "280"))
 PLAQUE_NAME_COL = int(os.environ.get("PLAQUE_NAME_COL", "1"))
 PLAQUE_POSITION_COL = int(os.environ.get("PLAQUE_POSITION_COL", "2"))
@@ -922,6 +923,45 @@ def get_plaque_worksheet():
     raise ConfigError("Не найден лист с gid={}".format(PLAQUE_WORKSHEET_GID))
 
 
+def plaque_row_url(row_index):
+    return "https://docs.google.com/spreadsheets/d/{}/edit?gid={}&range=A{}:E{}".format(
+        PLAQUE_SPREADSHEET_ID,
+        PLAQUE_WORKSHEET_GID,
+        row_index,
+        row_index,
+    )
+
+
+def plaque_cell_from_row(row, col_index):
+    return row[col_index - 1] if len(row) >= col_index else ""
+
+
+def verify_plaque_row(worksheet, row_index, name, position):
+    row = worksheet.row_values(row_index)
+    actual_name = normalize_space(plaque_cell_from_row(row, PLAQUE_NAME_COL))
+    actual_position = normalize_space(plaque_cell_from_row(row, PLAQUE_POSITION_COL))
+    actual_note = normalize_space(plaque_cell_from_row(row, PLAQUE_NOTE_COL))
+    expected_note = normalize_space(PLAQUE_NOTE_TEXT)
+    if actual_name != normalize_space(name) or actual_position != normalize_space(position) or actual_note != expected_note:
+        raise ConfigError(
+            "Google Sheets принял запрос, но проверка строки не совпала.\n"
+            "Строка: {}\n"
+            "Ожидалось: A='{}', B='{}', E='{}'\n"
+            "Прочитано: A='{}', B='{}', E='{}'\n"
+            "{}".format(
+                row_index,
+                name,
+                position,
+                PLAQUE_NOTE_TEXT,
+                actual_name or "пусто",
+                actual_position or "пусто",
+                actual_note or "пусто",
+                plaque_row_url(row_index),
+            )
+        )
+    return {"name": actual_name, "position": actual_position, "note": actual_note}
+
+
 def find_plaque_row(values, name):
     wanted = normalize_person_key(name)
     first_empty = None
@@ -956,8 +996,24 @@ def write_plaque_to_sheet(name, position):
         {"range": "{}{}".format(column_letter(PLAQUE_POSITION_COL), row_index), "values": [[position]]},
         {"range": "{}{}".format(column_letter(PLAQUE_NOTE_COL), row_index), "values": [[PLAQUE_NOTE_TEXT]]},
     ]
+    log("Запись плашки: spreadsheet={}, worksheet='{}' gid={}, row={}, action={}, name='{}'".format(
+        PLAQUE_SPREADSHEET_ID,
+        getattr(worksheet, "title", ""),
+        getattr(worksheet, "id", ""),
+        row_index,
+        action,
+        name,
+    ))
     worksheet.batch_update(updates, value_input_option="USER_ENTERED")
-    return {"row": row_index, "action": action}
+    verified = verify_plaque_row(worksheet, row_index, name, position)
+    return {
+        "row": row_index,
+        "action": action,
+        "worksheet_title": getattr(worksheet, "title", "") or PLAQUE_WORKSHEET_TITLE,
+        "worksheet_gid": getattr(worksheet, "id", PLAQUE_WORKSHEET_GID),
+        "url": plaque_row_url(row_index),
+        "verified": verified,
+    }
 
 
 def confirm_plaque(args, state, chat_id):
@@ -970,7 +1026,15 @@ def confirm_plaque(args, state, chat_id):
     result = write_plaque_to_sheet(name, position)
     clear_plaque_session(state, chat_id)
     action_text = "обновлена" if result["action"] == "updated" else "добавлена"
-    message = "Плашка {}.\nСтрока: {}\nФИО: {}\nДолжность: {}".format(action_text, result["row"], name, position)
+    message = "Плашка {}.\nЛист: {} (gid={})\nСтрока: {}\nФИО: {}\nДолжность: {}\n{}".format(
+        action_text,
+        result["worksheet_title"],
+        result["worksheet_gid"],
+        result["row"],
+        name,
+        position,
+        result["url"],
+    )
     send_plain_chat_message(args, chat_id, "TS26: готово", message)
     for admin_id in admin_chat_ids():
         if str(admin_id) != str(chat_id):
@@ -999,14 +1063,15 @@ def handle_plaque_callback(args, sheets, state, callback):
     if not can_use_plaque_form(sheets, state, chat_id):
         answer_callback(args, callback_id, "Форма доступна новым пользователям")
         return True
-    answer_callback(args, callback_id)
+    answer_callback(args, callback_id, "Записываю..." if data == "plq:confirm" else "Готово")
     if data == "plq:start":
         ask_plaque_name(args, state, chat_id)
     elif data == "plq:confirm":
         try:
             confirm_plaque(args, state, chat_id)
         except (MonitorError, ConfigError) as exc:
-            send_plain_chat_message(args, chat_id, "TS26: ошибка записи", str(exc), reply_markup=plaque_confirm_keyboard())
+            keyboard = plaque_confirm_user_mode_keyboard() if is_user_mode_chat(state, chat_id) else plaque_confirm_keyboard()
+            send_plain_chat_message(args, chat_id, "TS26: ошибка записи", str(exc), reply_markup=keyboard)
     elif data == "plq:edit_name":
         ask_plaque_name(args, state, chat_id)
     elif data == "plq:edit_position":
