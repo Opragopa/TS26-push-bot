@@ -325,7 +325,7 @@ PLAQUE_NOTE_TEXT=<-- добавлено через ТГ бота
 ### Как протестировать форму плашек
 
 1. На Bothost проверьте, что заданы `TELEGRAM_CHAT_ID`, `TELEGRAM_ADMIN_CHAT_IDS`, `GOOGLE_OAUTH_USER_JSON` или `GOOGLE_SERVICE_ACCOUNT_JSON`.
-2. Сделайте redeploy. В логах должна быть версия `2026-07-22.13` или новее.
+2. Сделайте redeploy. В логах должна быть версия `2026-07-22.14` или новее.
 3. Админом отправьте боту `/debug`.
 4. Нажмите `Google-доступ`. Если бот отвечает ошибкой про `GOOGLE_*`, добавьте на Bothost `GOOGLE_OAUTH_USER_JSON` или `GOOGLE_SERVICE_ACCOUNT_JSON` и перезапустите.
 5. Нажмите `Превью формы`, если нужно только посмотреть сценарий без записи в Google Sheet.

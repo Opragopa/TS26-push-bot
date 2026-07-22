@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.13"
+APP_VERSION = "2026-07-22.14"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -914,10 +914,40 @@ def get_google_client():
     return gspread.authorize(credentials)
 
 
+def describe_google_error(exc):
+    text = str(exc)
+    if "sheets.googleapis.com" in text and ("disabled" in text or "has not been used" in text):
+        project_match = re.search(r"project=(\d+)", text)
+        project_id = project_match.group(1) if project_match else "ВАШ_PROJECT_ID"
+        return (
+            "В проекте Google Cloud не включен Google Sheets API.\n"
+            "Откройте ссылку из лога Google или включите API здесь:\n"
+            "https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project={}\n"
+            "После включения подождите 2-5 минут и перезапустите бота."
+        ).format(project_id)
+    if "The caller does not have permission" in text or "PERMISSION_DENIED" in text or "403" in text:
+        return (
+            "У Google-аккаунта бота нет доступа к этой таблице или листу.\n"
+            "Проверьте, что таблица расшарена на аккаунт, которым создан GOOGLE_OAUTH_USER_JSON/GOOGLE_SERVICE_ACCOUNT_JSON, с правом редактора.\n"
+            "{}".format(text[:500])
+        )
+    return "Ошибка Google Sheets: {}".format(text[:700])
+
+
+def run_google_action(label, action):
+    try:
+        return action()
+    except ConfigError:
+        raise
+    except Exception as exc:
+        raise ConfigError("{}: {}".format(label, describe_google_error(exc)))
+
+
 def get_plaque_worksheet():
     client = get_google_client()
-    spreadsheet = client.open_by_key(PLAQUE_SPREADSHEET_ID)
-    for worksheet in spreadsheet.worksheets():
+    spreadsheet = run_google_action("Не удалось открыть таблицу для плашек", lambda: client.open_by_key(PLAQUE_SPREADSHEET_ID))
+    worksheets = run_google_action("Не удалось получить список листов", spreadsheet.worksheets)
+    for worksheet in worksheets:
         if worksheet.id == PLAQUE_WORKSHEET_GID:
             return worksheet
     raise ConfigError("Не найден лист с gid={}".format(PLAQUE_WORKSHEET_GID))
@@ -937,7 +967,7 @@ def plaque_cell_from_row(row, col_index):
 
 
 def verify_plaque_row(worksheet, row_index, name, position):
-    row = worksheet.row_values(row_index)
+    row = run_google_action("Не удалось проверить записанную строку", lambda: worksheet.row_values(row_index))
     actual_name = normalize_space(plaque_cell_from_row(row, PLAQUE_NAME_COL))
     actual_position = normalize_space(plaque_cell_from_row(row, PLAQUE_POSITION_COL))
     actual_note = normalize_space(plaque_cell_from_row(row, PLAQUE_NOTE_COL))
@@ -989,7 +1019,7 @@ def column_letter(index):
 
 def write_plaque_to_sheet(name, position):
     worksheet = get_plaque_worksheet()
-    values = worksheet.get_all_values()
+    values = run_google_action("Не удалось прочитать строки листа для плашек", worksheet.get_all_values)
     row_index, action = find_plaque_row(values, name)
     updates = [
         {"range": "{}{}".format(column_letter(PLAQUE_NAME_COL), row_index), "values": [[name]]},
@@ -1004,7 +1034,7 @@ def write_plaque_to_sheet(name, position):
         action,
         name,
     ))
-    worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+    run_google_action("Не удалось записать плашку в Google Sheets", lambda: worksheet.batch_update(updates, value_input_option="USER_ENTERED"))
     verified = verify_plaque_row(worksheet, row_index, name, position)
     return {
         "row": row_index,
