@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 APP_NAME = "tg-pushes-TS26"
-DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR", "data")).expanduser()
+DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
 DEFAULT_INTERVAL_SECONDS = int(os.environ.get("SHEET_MONITOR_INTERVAL", "120"))
