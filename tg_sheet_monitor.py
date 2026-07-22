@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 def env_bool(name, default=False):
@@ -26,8 +27,19 @@ def env_bool(name, default=False):
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def env_int(name, default):
+    value = os.environ.get(name)
+    if value is None or not str(value).strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        log("Некорректное значение {}={}, использую {}.".format(name, value, default))
+        return default
+
+
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.17"
+APP_VERSION = "2026-07-22.18"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -41,6 +53,10 @@ DEFAULT_PLAQUE_FORM = env_bool("PLAQUE_FORM_ENABLED", True)
 USER_AGENT = "tg-pushes-ts26-sheet-monitor/1.0"
 MAX_CHANGE_MESSAGES = 12
 MAX_MACOS_BODY_LENGTH = 220
+MAX_TELEGRAM_MESSAGE_CHARS = 3800
+CONTENT_PLAN_DIGEST_STATE_KEY = "_content_plan_hourly_digest"
+CONTENT_PLAN_TIME_ZONE = ZoneInfo("Europe/Moscow")
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 TELEGRAM_PARSE_MODE = "HTML"
 DIFF_BOUNDARY_CHARS = " \t,.;:!?-–—()[]{}«»\"'"
 PLAQUE_SPREADSHEET_ID = os.environ.get("PLAQUE_SPREADSHEET_ID", "1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js")
@@ -86,6 +102,10 @@ class ConfigError(Exception):
 
 def now_text():
     return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def moscow_now():
+    return _dt.datetime.now(CONTENT_PLAN_TIME_ZONE)
 
 
 def log(message):
@@ -437,6 +457,67 @@ def send_telegram_to_chat_ids(args, chat_ids, title, message, subtitle="", url="
         raise MonitorError("; ".join(errors))
 
 
+def split_long_telegram_line(line):
+    """Keep every character while making a single very long diff line sendable."""
+    line = str(line or "")
+    if len(line) <= 600:
+        return [line]
+    result = []
+    remaining = line
+    while remaining:
+        if len(remaining) <= 600:
+            result.append(remaining)
+            break
+        split_at = remaining.rfind(" ", 0, 600)
+        if split_at < 200:
+            split_at = 600
+        result.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+    return result
+
+
+def telegram_message_chunks(title, message, subtitle="", url=""):
+    """Split a rich Telegram message on source lines before HTML is rendered."""
+    lines = []
+    for raw_line in str(message or "").splitlines():
+        lines.extend(split_long_telegram_line(raw_line))
+    if not lines:
+        return [(title, "", subtitle, url)]
+
+    chunks = []
+    current = []
+    for line in lines:
+        candidate = "\n".join(current + [line])
+        candidate_url = url if not chunks else ""
+        if current and len(render_telegram_message(title, candidate, subtitle=subtitle, url=candidate_url)) > MAX_TELEGRAM_MESSAGE_CHARS:
+            chunks.append("\n".join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        chunks.append("\n".join(current))
+
+    result = []
+    for index, chunk in enumerate(chunks):
+        chunk_title = title if index == 0 else "{} (продолжение)".format(title)
+        result.append((chunk_title, chunk, subtitle, url if index == 0 else ""))
+    return result
+
+
+def send_telegram_chunks_to_chat_ids(args, chat_ids, title, message, subtitle="", url=""):
+    chunks = telegram_message_chunks(title, message, subtitle=subtitle, url=url)
+    for chunk_title, chunk_message, chunk_subtitle, chunk_url in chunks:
+        send_telegram_to_chat_ids(
+            args,
+            chat_ids,
+            chunk_title,
+            chunk_message,
+            subtitle=chunk_subtitle,
+            url=chunk_url,
+        )
+    return len(chunks)
+
+
 def applescript_quote(value):
     text = str(value or "")
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -486,6 +567,161 @@ def try_send_telegram(args, title, message, subtitle="", url="", sheet=None, sta
     except (MonitorError, ConfigError) as exc:
         log("Не удалось отправить Telegram-сообщение: {}".format(exc))
         return False
+
+
+def content_plan_digest_state(state):
+    digest = state.setdefault(CONTENT_PLAN_DIGEST_STATE_KEY, {})
+    if not isinstance(digest, dict):
+        digest = {}
+        state[CONTENT_PLAN_DIGEST_STATE_KEY] = digest
+    events = digest.get("events")
+    if not isinstance(events, list):
+        digest["events"] = []
+    return digest
+
+
+def content_plan_hour_key(moment=None):
+    moment = moment or moscow_now()
+    return moment.strftime("%Y-%m-%dT%H")
+
+
+def queue_content_plan_change(state, message, captured_at=None):
+    digest = content_plan_digest_state(state)
+    lines = [line for line in str(message or "").splitlines() if line.strip()]
+    digest["events"].append({
+        "captured_at": captured_at or now_text(),
+        "diff": str(message or ""),
+        "change_count": len(lines),
+    })
+    return len(digest["events"])
+
+
+def openai_response_text(payload, timeout):
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not key:
+        raise ConfigError("Не задан OPENAI_API_KEY: отправляю diff без AI-сводки.")
+    request = urllib.request.Request(
+        OPENAI_RESPONSES_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer {}".format(key),
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise MonitorError("OpenAI HTTP {}: {}".format(exc.code, body[:500]))
+    except urllib.error.URLError as exc:
+        raise MonitorError("OpenAI недоступен: {}".format(exc.reason))
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        raise MonitorError("OpenAI вернул не JSON: {}".format(raw[:500]))
+    if parsed.get("error"):
+        error = parsed["error"]
+        detail = error.get("message") if isinstance(error, dict) else str(error)
+        raise MonitorError("OpenAI ошибка: {}".format(detail))
+    output_text = parsed.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+    for output in parsed.get("output") or []:
+        for content in output.get("content") or []:
+            if content.get("type") == "output_text" and content.get("text"):
+                return str(content["text"]).strip()
+    raise MonitorError("OpenAI не вернул текст сводки.")
+
+
+def build_ai_content_plan_summary(diff, timeout):
+    max_chars = max(1000, env_int("OPENAI_SUMMARY_MAX_INPUT_CHARS", 60000))
+    source_diff = str(diff or "")
+    if len(source_diff) > max_chars:
+        source_diff = source_diff[:max_chars].rstrip() + "\n[Остальная часть diff будет показана ниже без изменений.]"
+        log("Diff для AI-сводки сокращен до {} символов.".format(max_chars))
+    model = os.environ.get("OPENAI_SUMMARY_MODEL", "gpt-5-mini").strip() or "gpt-5-mini"
+    payload = {
+        "model": model,
+        "instructions": (
+            "Ты готовишь короткую сводку изменений Контент-плана для Telegram. "
+            "Верни только 3-5 коротких строк на русском. Каждая строка должна описывать "
+            "заметный факт из diff. Не добавляй факты, имена, даты или ссылки, которых нет "
+            "в diff. Не используй Markdown, HTML, заголовки и вступления."
+        ),
+        "input": source_diff,
+        "max_output_tokens": 350,
+    }
+    response = openai_response_text(payload, timeout)
+    lines = []
+    for raw_line in response.splitlines():
+        line = normalize_space(raw_line).lstrip("-• ").strip()
+        line = re.sub(r"https?://\S+", "", line).strip()
+        if line:
+            lines.append(line)
+        if len(lines) == 5:
+            break
+    if not lines:
+        raise MonitorError("OpenAI вернул пустую AI-сводку.")
+    return "\n".join(lines)
+
+
+def flush_content_plan_digest(args, sheets, state, moment=None):
+    """Send one Content Plan package after an hour boundary, retaining failures."""
+    digest = content_plan_digest_state(state)
+    current_hour = content_plan_hour_key(moment)
+    events = digest.get("events") or []
+    last_flush_hour = digest.get("last_flush_hour")
+
+    if not events:
+        if last_flush_hour != current_hour:
+            digest["last_flush_hour"] = current_hour
+            return True
+        return False
+    if last_flush_hour == current_hour:
+        return False
+
+    content_sheet = next((sheet for sheet in sheets if is_content_plan_sheet(sheet)), None)
+    if not content_sheet:
+        return False
+    diffs = [str(event.get("diff") or "") for event in events if str(event.get("diff") or "").strip()]
+    if not diffs:
+        digest["events"] = []
+        digest["last_flush_hour"] = current_hour
+        return True
+    full_diff = "\n".join(diffs)
+    event_count = len(events)
+    change_count = sum(int(event.get("change_count") or 0) for event in events)
+    try:
+        ai_summary = build_ai_content_plan_summary(full_diff, args.timeout)
+        summary_block = "Коротко за час:\n{}".format(ai_summary)
+        log("AI-сводка Контент-плана готова: событий {}, строк diff {}.".format(event_count, change_count))
+    except (MonitorError, ConfigError) as exc:
+        summary_block = "Коротко за час: AI-сводка недоступна, ниже полный diff."
+        log("AI-сводка Контент-плана не получена: {}".format(exc))
+
+    message = "{}\n\nПолный diff:\n{}".format(summary_block, full_diff)
+    try:
+        send_macos_notification(args, "TS26: обновления за час", summary_block, subtitle=content_sheet["label"])
+        chunks = send_telegram_chunks_to_chat_ids(
+            args,
+            recipient_chat_ids(content_sheet, state=state),
+            "TS26: обновления за час",
+            message,
+            subtitle=content_sheet["label"],
+            url=content_sheet["url"],
+        )
+    except (MonitorError, ConfigError) as exc:
+        log("Не удалось отправить почасовой пакет Контент-плана: {}".format(exc))
+        return False
+
+    digest["events"] = []
+    digest["last_flush_hour"] = current_hour
+    digest["last_sent_at"] = now_text()
+    log("Почасовой пакет Контент-плана отправлен: событий {}, строк diff {}, сообщений {}.".format(event_count, change_count, chunks))
+    return True
 
 
 def h(value):
@@ -1463,7 +1699,7 @@ def looks_like_people_table(headers):
     return bool(normalized.intersection({"фио", "ф.и.о.", "имя", "фио спикера", "спикер"}))
 
 
-def build_change_messages(sheet_label, previous_rows, current_rows):
+def build_change_messages(sheet_label, previous_rows, current_rows, max_messages=MAX_CHANGE_MESSAGES):
     if not previous_rows:
         return []
     previous_header_index = detect_header_row(previous_rows)
@@ -1495,13 +1731,13 @@ def build_change_messages(sheet_label, previous_rows, current_rows):
                 messages.append(describe_cell_change(sheet_label, row_name, header, old_value, new_value))
             else:
                 messages.append(describe_grid_change(sheet_label, day_name, row_name, header, old_value, new_value))
-            if len(messages) >= MAX_CHANGE_MESSAGES:
+            if max_messages is not None and len(messages) >= max_messages:
                 return messages
 
     for key in previous_by_key:
         if key not in current_by_key:
             messages.append("{}: удалена строка «{}».".format(sheet_label, row_identity(previous_rows, headers, previous_by_key[key], key_col)))
-            if len(messages) >= MAX_CHANGE_MESSAGES:
+            if max_messages is not None and len(messages) >= max_messages:
                 return messages
 
     paired_fallback = min(len(previous_fallback), len(current_fallback))
@@ -1516,28 +1752,29 @@ def build_change_messages(sheet_label, previous_rows, current_rows):
             if old_value == new_value:
                 continue
             messages.append(describe_grid_change(sheet_label, day_name, row_name, header, old_value, new_value))
-            if len(messages) >= MAX_CHANGE_MESSAGES:
+            if max_messages is not None and len(messages) >= max_messages:
                 return messages
 
     for row_index in current_fallback[paired_fallback:]:
         messages.append("{}: добавлена строка «{}».".format(sheet_label, row_identity(current_rows, headers, row_index, key_col)))
-        if len(messages) >= MAX_CHANGE_MESSAGES:
+        if max_messages is not None and len(messages) >= max_messages:
             return messages
     for row_index in previous_fallback[paired_fallback:]:
         messages.append("{}: удалена строка «{}».".format(sheet_label, row_identity(previous_rows, headers, row_index, key_col)))
-        if len(messages) >= MAX_CHANGE_MESSAGES:
+        if max_messages is not None and len(messages) >= max_messages:
             return messages
 
     return messages
 
 
-def build_change_summary(sheet_label, previous, current):
+def build_change_summary(sheet_label, previous, current, full_diff=False):
     previous_rows = previous.get("cells") or []
     current_rows = current.get("cells") or []
-    messages = build_change_messages(sheet_label, previous_rows, current_rows)
+    max_messages = None if full_diff else MAX_CHANGE_MESSAGES
+    messages = build_change_messages(sheet_label, previous_rows, current_rows, max_messages=max_messages)
     if messages:
         hidden_count = max(0, estimate_changed_cells(previous_rows, current_rows) - len(messages))
-        if hidden_count > 0:
+        if not full_diff and hidden_count > 0:
             messages.append("Показаны первые {} изменений, еще примерно {} не показано.".format(MAX_CHANGE_MESSAGES, hidden_count))
         return "\n".join(messages)
     old_rows = previous.get("rows")
@@ -1570,9 +1807,14 @@ def check_sheet(sheet, state, args):
 
     old_hash = previous.get("hash")
     if old_hash and old_hash != current["hash"]:
-        message = build_change_summary(label, previous, current)
+        is_content_plan = is_content_plan_sheet(sheet)
+        message = build_change_summary(label, previous, current, full_diff=is_content_plan)
         log("Обновление: {} ({})".format(label, message.splitlines()[0] if message else "есть изменения"))
-        notify(args, "TS26: обновилась таблица", message, subtitle=label, url=sheet["url"], sheet=sheet, state=state)
+        if is_content_plan:
+            queue_size = queue_content_plan_change(state, message, captured_at=current["checked_at"])
+            log("Изменение Контент-плана добавлено в почасовую очередь: событий {}.".format(queue_size))
+        else:
+            notify(args, "TS26: обновилась таблица", message, subtitle=label, url=sheet["url"], sheet=sheet, state=state)
     elif not old_hash:
         log("Первый снимок: {} (строк: {}, {} байт)".format(label, current["rows"], current["bytes"]))
         if args.notify_initial:
@@ -1670,6 +1912,8 @@ def main(argv=None):
     if poll_admin_updates(args, sheets, state):
         save_state(state_path, state)
     while True:
+        if flush_content_plan_digest(args, sheets, state):
+            save_state(state_path, state)
         if check_all(sheets, state, args):
             save_state(state_path, state)
         if args.once:
@@ -1682,6 +1926,8 @@ def main(argv=None):
             remaining = next_check_at - time.monotonic()
             if remaining <= 0:
                 break
+            if flush_content_plan_digest(args, sheets, state):
+                save_state(state_path, state)
             if poll_admin_updates(args, sheets, state):
                 save_state(state_path, state)
             time.sleep(min(5, remaining))
