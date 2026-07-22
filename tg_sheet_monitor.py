@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.8"
+APP_VERSION = "2026-07-22.9"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -532,6 +532,7 @@ def admin_keyboard():
             ],
             [
                 {"text": "Тест старта", "callback_data": "dbg:test:startup"},
+                {"text": "Превью формы", "callback_data": "dbg:preview_plaque"},
             ],
         ]
     }
@@ -623,6 +624,16 @@ def send_test_to_sheet(args, chat_id, sheet):
         send_admin_message(args, chat_id, "TS26: ошибка теста", "Таблица: {}\n{}".format(sheet["label"], exc), reply_markup=admin_keyboard())
 
 
+def send_plaque_preview(args, chat_id):
+    send_admin_message(args, chat_id, "TS26: превью обычного пользователя", "Ниже бот покажет, как форму видит обычный пользователь. Это только превью: Google Sheet не изменится.")
+    send_plain_chat_message(args, chat_id, "TS26: плашка", "Здесь можно добавить или обновить плашку для моушена.\n\nБот попросит «Фамилия Имя» и «Должность», затем покажет подтверждение перед записью в таблицу.", reply_markup=plaque_keyboard())
+    send_plain_chat_message(args, chat_id, "TS26: новая плашка", "Введите имя в формате:\nФамилия Имя")
+    send_plain_chat_message(args, chat_id, "TS26: новая плашка", "Введите должность для плашки.")
+    preview_state = {"_plaque_sessions": {str(chat_id): {"name": "Иванов Иван", "position": "директор подразделения"}}}
+    send_plaque_confirmation(args, preview_state, chat_id)
+    send_plain_chat_message(args, chat_id, "TS26: готово", "После подтверждения пользователь увидит примерно так:\n\nПлашка добавлена.\nСтрока: 280\nФИО: Иванов Иван\nДолжность: директор подразделения", reply_markup=admin_keyboard())
+
+
 def handle_admin_callback(args, sheets, state, callback):
     if args.no_admin_buttons:
         return False
@@ -644,6 +655,8 @@ def handle_admin_callback(args, sheets, state, callback):
     elif data == "dbg:test:startup":
         send_startup_message(args, sheets)
         send_admin_message(args, chat_id, "TS26: тест старта", "Стартовое сообщение отправлено основным получателям.", reply_markup=admin_keyboard())
+    elif data == "dbg:preview_plaque":
+        send_plaque_preview(args, chat_id)
     elif data.startswith("dbg:test:"):
         label = data.split(":", 2)[2]
         sheet = find_sheet_by_label(sheets, label)
@@ -674,6 +687,8 @@ def handle_admin_message(args, sheets, state, message):
         send_admin_message(args, chat_id, "TS26: статус", status_report(args, sheets, state), reply_markup=admin_keyboard())
     elif command == "/recipients":
         send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets), reply_markup=admin_keyboard())
+    elif command == "/preview_user":
+        send_plaque_preview(args, chat_id)
     elif command == "/test_content":
         sheet = find_sheet_by_label(sheets, "Контент-план")
         if sheet:
