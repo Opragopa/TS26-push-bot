@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.5"
+APP_VERSION = "2026-07-22.6"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -41,6 +41,7 @@ USER_AGENT = "tg-pushes-ts26-sheet-monitor/1.0"
 MAX_CHANGE_MESSAGES = 12
 MAX_MACOS_BODY_LENGTH = 220
 TELEGRAM_PARSE_MODE = "HTML"
+DIFF_BOUNDARY_CHARS = " \t,.;:!?-–—()[]{}«»\"'"
 KEY_COLUMN_CANDIDATES = (
     "фио",
     "ф.и.о.",
@@ -399,6 +400,44 @@ def h(value):
     return html.escape(str(value or ""), quote=False)
 
 
+def changed_span(value, other_value):
+    text = normalize_space(value)
+    other = normalize_space(other_value)
+    if not text:
+        return (0, len(text))
+    prefix_len = 0
+    max_prefix = min(len(text), len(other))
+    while prefix_len < max_prefix and text[prefix_len] == other[prefix_len]:
+        prefix_len += 1
+
+    suffix_len = 0
+    max_suffix = min(len(text) - prefix_len, len(other) - prefix_len)
+    while suffix_len < max_suffix and text[len(text) - 1 - suffix_len] == other[len(other) - 1 - suffix_len]:
+        suffix_len += 1
+
+    start = prefix_len
+    end = len(text) - suffix_len
+    while start < end and text[start] in DIFF_BOUNDARY_CHARS:
+        start += 1
+    while end > start and text[end - 1] in DIFF_BOUNDARY_CHARS:
+        end -= 1
+    if start >= end:
+        return (0, len(text))
+    while start > 0 and text[start - 1] not in DIFF_BOUNDARY_CHARS:
+        start -= 1
+    while end < len(text) and text[end] not in DIFF_BOUNDARY_CHARS:
+        end += 1
+    return (start, end)
+
+
+def underline_changed_value(value, other_value):
+    text = display_value(value)
+    if text == "пусто":
+        return "<u>{}</u>".format(h(text))
+    start, end = changed_span(text, display_value(other_value))
+    return "{}<u>{}</u>{}".format(h(text[:start]), h(text[start:end]), h(text[end:]))
+
+
 def render_telegram_message(title, message, subtitle="", url=""):
     lines = ["<b>{}</b>".format(h(title))]
     if subtitle:
@@ -425,30 +464,30 @@ def render_telegram_change_line(line):
     grid_match = re.match(r"^(.+?): строка «(.+?)», колонка «(.+?)» - было «(.*?)», стало «(.*?)»\.$", line)
     if grid_match:
         _sheet, row_name, column_name, old_value, new_value = grid_match.groups()
-        return "• <b>Строка:</b> {}\n  <b>Колонка:</b> {}\n  <b>Было:</b> <code>{}</code>\n  <b>Стало:</b> <code>{}</code>".format(
+        return "• <b>Строка:</b> {}\n  <b>Колонка:</b> {}\n  <b>Было:</b> {}\n  <b>Стало:</b> {}".format(
             h(row_name),
             h(column_name),
-            h(old_value),
-            h(new_value),
+            underline_changed_value(old_value, new_value),
+            underline_changed_value(new_value, old_value),
         )
 
     field_match = re.match(r"^Изменено поле «(.+?)» у (.+?): было «(.*?)», стало «(.*?)»\.$", line)
     if field_match:
         field_name, row_name, old_value, new_value = field_match.groups()
-        return "• <b>{}</b> у {}\n  <b>Было:</b> <code>{}</code>\n  <b>Стало:</b> <code>{}</code>".format(
+        return "• <b>{}</b> у {}\n  <b>Было:</b> {}\n  <b>Стало:</b> {}".format(
             h(field_name),
             h(row_name),
-            h(old_value),
-            h(new_value),
+            underline_changed_value(old_value, new_value),
+            underline_changed_value(new_value, old_value),
         )
 
     position_match = re.match(r"^Изменена должность у (.+?): было «(.*?)», стало «(.*?)»\.$", line)
     if position_match:
         row_name, old_value, new_value = position_match.groups()
-        return "• <b>Должность</b> у {}\n  <b>Было:</b> <code>{}</code>\n  <b>Стало:</b> <code>{}</code>".format(
+        return "• <b>Должность</b> у {}\n  <b>Было:</b> {}\n  <b>Стало:</b> {}".format(
             h(row_name),
-            h(old_value),
-            h(new_value),
+            underline_changed_value(old_value, new_value),
+            underline_changed_value(new_value, old_value),
         )
 
     added_match = re.match(r"^(.+?): добавлена строка «(.+?)»\.$", line)
