@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.14"
+APP_VERSION = "2026-07-22.15"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -1056,7 +1056,8 @@ def confirm_plaque(args, state, chat_id):
     result = write_plaque_to_sheet(name, position)
     clear_plaque_session(state, chat_id)
     action_text = "обновлена" if result["action"] == "updated" else "добавлена"
-    message = "Плашка {}.\nЛист: {} (gid={})\nСтрока: {}\nФИО: {}\nДолжность: {}\n{}".format(
+    public_message = "Плашка {}.\nФИО: {}\nДолжность: {}".format(action_text, name, position)
+    admin_message = "Плашка {}.\nЛист: {} (gid={})\nСтрока: {}\nФИО: {}\nДолжность: {}\n{}".format(
         action_text,
         result["worksheet_title"],
         result["worksheet_gid"],
@@ -1065,13 +1066,12 @@ def confirm_plaque(args, state, chat_id):
         position,
         result["url"],
     )
-    send_plain_chat_message(args, chat_id, "TS26: готово", message)
+    send_plain_chat_message(args, chat_id, "TS26: готово", public_message)
     for admin_id in admin_chat_ids():
-        if str(admin_id) != str(chat_id):
-            try:
-                send_plain_chat_message(args, admin_id, "TS26: плашка через бота", message)
-            except (MonitorError, ConfigError) as exc:
-                log("Не удалось уведомить админа о плашке: {}".format(exc))
+        try:
+            send_plain_chat_message(args, admin_id, "TS26: плашка через бота", admin_message)
+        except (MonitorError, ConfigError) as exc:
+            log("Не удалось уведомить админа о плашке: {}".format(exc))
 
 
 def handle_plaque_callback(args, sheets, state, callback):
