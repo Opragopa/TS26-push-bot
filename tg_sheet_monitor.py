@@ -17,11 +17,20 @@ import urllib.request
 from pathlib import Path
 
 
+def env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 APP_NAME = "tg-pushes-TS26"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
 DEFAULT_INTERVAL_SECONDS = int(os.environ.get("SHEET_MONITOR_INTERVAL", "120"))
+DEFAULT_NOTIFY_INITIAL = env_bool("SHEET_MONITOR_NOTIFY_INITIAL", False)
+DEFAULT_STARTUP_MESSAGE = env_bool("SHEET_MONITOR_STARTUP_MESSAGE", False)
 USER_AGENT = "tg-pushes-ts26-sheet-monitor/1.0"
 MAX_CHANGE_MESSAGES = 12
 KEY_COLUMN_CANDIDATES = (
@@ -79,13 +88,6 @@ def load_dotenv(path):
             value = value.strip().strip('"').strip("'")
             if key and key not in os.environ:
                 os.environ[key] = value
-
-
-def env_bool(name, default=False):
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def split_env_list(value):
@@ -574,6 +576,14 @@ def check_all(sheets, state, args):
     return changed_state
 
 
+def send_startup_message(args, sheets):
+    labels = ", ".join([sheet["label"] for sheet in sheets])
+    message = "Бот запущен. Отслеживается таблиц: {}. Интервал проверки: {} сек.".format(len(sheets), args.interval)
+    if labels:
+        message = "{}\n{}".format(message, labels)
+    try_send_telegram(args, "Монитор Google Sheets активен", message)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Фоново проверяет Google Sheets и отправляет Telegram-уведомления при изменениях."
@@ -585,7 +595,8 @@ def build_parser():
     parser.add_argument("--sheet", action="append", default=[], help='Таблица: "Название=https://docs.google.com/...". Если задано, заменяет sheets.json.')
     parser.add_argument("--env", default=".env", help="Файл с TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID.")
     parser.add_argument("--once", action="store_true", help="Проверить один раз и выйти.")
-    parser.add_argument("--notify-initial", action="store_true", help="Отправить Telegram-сообщение при первом сохранении снимка.")
+    parser.add_argument("--notify-initial", action="store_true", default=DEFAULT_NOTIFY_INITIAL, help="Отправить Telegram-сообщение при первом сохранении снимка.")
+    parser.add_argument("--startup-message", action="store_true", default=DEFAULT_STARTUP_MESSAGE, help="Отправить Telegram-сообщение при запуске.")
     parser.add_argument("--print-chat-ids", action="store_true", help="Показать chat_id из последних сообщений боту и выйти.")
     parser.add_argument("--no-telegram", action="store_true", help="Не отправлять Telegram-сообщения, только писать лог.")
     parser.add_argument("--quiet", action="store_true", help="Не писать в лог проверки без изменений.")
@@ -607,6 +618,8 @@ def main(argv=None):
     state = load_state(state_path)
 
     log("Старт монитора: {} таблиц, интервал {} сек.".format(len(sheets), args.interval))
+    if args.startup_message:
+        send_startup_message(args, sheets)
     while True:
         if check_all(sheets, state, args):
             save_state(state_path, state)

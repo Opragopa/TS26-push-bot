@@ -132,9 +132,10 @@ python3 tg_sheet_monitor.py --once --no-telegram
    TELEGRAM_CHAT_ID=ваш_основной_chat_id
    SHEET_MONITOR_INTERVAL=120
    SHEET_MONITOR_DATA_DIR=data
+   SHEET_MONITOR_STARTUP_MESSAGE=true
    ```
 
-   `SHEET_MONITOR_INTERVAL` и `SHEET_MONITOR_DATA_DIR` можно не указывать: такие значения используются по умолчанию.
+   `SHEET_MONITOR_INTERVAL`, `SHEET_MONITOR_DATA_DIR` и `SHEET_MONITOR_STARTUP_MESSAGE` можно не указывать. `SHEET_MONITOR_STARTUP_MESSAGE=true` удобно включать только для теста: бот пришлет сообщение сразу после старта.
 
 7. Нажмите деплой/запуск и откройте логи.
 
@@ -145,6 +146,20 @@ python3 tg_sheet_monitor.py --once --no-telegram
 ```
 
 Первый запуск сохранит базовый снимок. Реальные уведомления об изменениях начнут приходить со следующего изменения таблицы.
+
+Для теста доставки без изменения таблиц добавьте в Bothost переменную:
+
+```text
+SHEET_MONITOR_STARTUP_MESSAGE=true
+```
+
+Затем перезапустите бота. В Telegram должно прийти сообщение `Монитор Google Sheets активен`. После проверки переменную лучше удалить или поставить `false`, иначе сообщение будет приходить при каждом рестарте.
+
+Если хотите получить уведомления и при первом сохранении снимка:
+
+```text
+SHEET_MONITOR_NOTIFY_INITIAL=true
+```
 
 ## Параметры
 
