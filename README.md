@@ -101,6 +101,51 @@ python3 tg_sheet_monitor.py --once --notify-initial
 python3 tg_sheet_monitor.py --once --no-telegram
 ```
 
+## Запуск на Bothost
+
+В Bothost можно запускать прямо из GitHub-репозитория.
+
+1. Создайте или откройте бота в панели Bothost.
+2. Укажите репозиторий:
+
+   ```text
+   https://github.com/Opragopa/TS26-push-bot.git
+   ```
+
+3. Ветка:
+
+   ```text
+   main
+   ```
+
+4. Главный файл:
+
+   ```text
+   main.py
+   ```
+
+5. Платформа/язык: `Python`.
+6. В переменных окружения добавьте:
+
+   ```text
+   TELEGRAM_BOT_TOKEN=ваш_токен_от_BotFather
+   TELEGRAM_CHAT_ID=ваш_основной_chat_id
+   SHEET_MONITOR_INTERVAL=120
+   SHEET_MONITOR_DATA_DIR=data
+   ```
+
+   `SHEET_MONITOR_INTERVAL` и `SHEET_MONITOR_DATA_DIR` можно не указывать: такие значения используются по умолчанию.
+
+7. Нажмите деплой/запуск и откройте логи.
+
+В логах должен появиться старт:
+
+```text
+Старт монитора: 2 таблиц, интервал 120 сек.
+```
+
+Первый запуск сохранит базовый снимок. Реальные уведомления об изменениях начнут приходить со следующего изменения таблицы.
+
 ## Параметры
 
 ```bash

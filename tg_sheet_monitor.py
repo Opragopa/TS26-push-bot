@@ -18,10 +18,10 @@ from pathlib import Path
 
 
 APP_NAME = "tg-pushes-TS26"
-DEFAULT_DATA_DIR = Path.home() / "Documents" / "tg_sheet_monitor"
+DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR", "data")).expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
-DEFAULT_INTERVAL_SECONDS = 120
+DEFAULT_INTERVAL_SECONDS = int(os.environ.get("SHEET_MONITOR_INTERVAL", "120"))
 USER_AGENT = "tg-pushes-ts26-sheet-monitor/1.0"
 MAX_CHANGE_MESSAGES = 12
 KEY_COLUMN_CANDIDATES = (
