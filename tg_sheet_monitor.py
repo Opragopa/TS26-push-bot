@@ -6,9 +6,11 @@ import argparse
 import csv
 import datetime as _dt
 import hashlib
+import html
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -25,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.3"
+APP_VERSION = "2026-07-22.4"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -33,8 +35,11 @@ DEFAULT_INTERVAL_SECONDS = int(os.environ.get("SHEET_MONITOR_INTERVAL", "120"))
 DEFAULT_DURATION_SECONDS = int(os.environ.get("SHEET_MONITOR_DURATION_SECONDS", "0"))
 DEFAULT_NOTIFY_INITIAL = env_bool("SHEET_MONITOR_NOTIFY_INITIAL", False)
 DEFAULT_STARTUP_MESSAGE = env_bool("SHEET_MONITOR_STARTUP_MESSAGE", False)
+DEFAULT_MACOS_NOTIFICATIONS = env_bool("SHEET_MONITOR_MACOS_NOTIFICATIONS", True)
 USER_AGENT = "tg-pushes-ts26-sheet-monitor/1.0"
 MAX_CHANGE_MESSAGES = 12
+MAX_MACOS_BODY_LENGTH = 220
+TELEGRAM_PARSE_MODE = "HTML"
 KEY_COLUMN_CANDIDATES = (
     "фио",
     "ф.и.о.",
@@ -301,18 +306,13 @@ def send_telegram(args, title, message, subtitle="", url="", sheet=None):
     chat_ids = recipient_chat_ids(sheet)
     if not chat_ids:
         raise ConfigError("Заполните TELEGRAM_CHAT_ID или TELEGRAM_CHAT_IDS в .env/окружении. chat_id можно узнать через --print-chat-ids.")
-    lines = ["*{}*".format(telegram_escape(title))]
-    if subtitle:
-        lines.append(telegram_escape(subtitle))
-    lines.append(telegram_escape(message))
-    if url:
-        lines.append(telegram_escape(url))
+    text = render_telegram_message(title, message, subtitle=subtitle, url=url)
     errors = []
     for chat_id in chat_ids:
         payload = {
             "chat_id": chat_id,
-            "text": "\n".join(lines),
-            "parse_mode": "MarkdownV2",
+            "text": text,
+            "parse_mode": TELEGRAM_PARSE_MODE,
             "disable_web_page_preview": "true" if env_bool("TELEGRAM_DISABLE_WEB_PAGE_PREVIEW", True) else "false",
         }
         try:
@@ -324,6 +324,48 @@ def send_telegram(args, title, message, subtitle="", url="", sheet=None):
         raise MonitorError("; ".join(errors))
 
 
+def applescript_quote(value):
+    text = str(value or "")
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def compact_notification_text(message, limit=MAX_MACOS_BODY_LENGTH):
+    lines = [normalize_space(line) for line in str(message or "").splitlines()]
+    text = " ".join([line for line in lines if line])
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def send_macos_notification(args, title, message, subtitle=""):
+    if args.no_macos_notifications or sys.platform != "darwin":
+        return False
+    body = compact_notification_text(message)
+    if not body:
+        body = title
+    command = [
+        "display notification {}".format(applescript_quote(body)),
+        "with title {}".format(applescript_quote(title)),
+    ]
+    if subtitle:
+        command.append("subtitle {}".format(applescript_quote(subtitle)))
+    script = " ".join(command)
+    try:
+        subprocess.run(["osascript", "-e", script], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        log("macOS-уведомление отправлено: {}".format(title))
+        return True
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
+        if not args.quiet:
+            log("macOS-уведомление не отправлено: {}".format(detail))
+        return False
+
+
+def notify(args, title, message, subtitle="", url="", sheet=None):
+    send_macos_notification(args, title, message, subtitle=subtitle)
+    return try_send_telegram(args, title, message, subtitle=subtitle, url=url, sheet=sheet)
+
+
 def try_send_telegram(args, title, message, subtitle="", url="", sheet=None):
     try:
         send_telegram(args, title, message, subtitle=subtitle, url=url, sheet=sheet)
@@ -333,8 +375,73 @@ def try_send_telegram(args, title, message, subtitle="", url="", sheet=None):
         return False
 
 
-def telegram_escape(value):
-    return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(value))
+def h(value):
+    return html.escape(str(value or ""), quote=False)
+
+
+def render_telegram_message(title, message, subtitle="", url=""):
+    lines = ["<b>{}</b>".format(h(title))]
+    if subtitle:
+        lines.append("<i>{}</i>".format(h(subtitle)))
+    body = render_telegram_body(message)
+    if body:
+        lines.extend(["", body])
+    if url:
+        lines.extend(["", '<a href="{}">Открыть таблицу</a>'.format(html.escape(str(url), quote=True))])
+    return "\n".join(lines)
+
+
+def render_telegram_body(message):
+    rendered = []
+    for raw_line in str(message or "").splitlines():
+        line = normalize_space(raw_line)
+        if not line:
+            continue
+        rendered.append(render_telegram_change_line(line))
+    return "\n\n".join(rendered)
+
+
+def render_telegram_change_line(line):
+    grid_match = re.match(r"^(.+?): строка «(.+?)», колонка «(.+?)» - было «(.*?)», стало «(.*?)»\.$", line)
+    if grid_match:
+        _sheet, row_name, column_name, old_value, new_value = grid_match.groups()
+        return "• <b>Строка:</b> {}\n  <b>Колонка:</b> {}\n  <b>Было:</b> <code>{}</code>\n  <b>Стало:</b> <code>{}</code>".format(
+            h(row_name),
+            h(column_name),
+            h(old_value),
+            h(new_value),
+        )
+
+    field_match = re.match(r"^Изменено поле «(.+?)» у (.+?): было «(.*?)», стало «(.*?)»\.$", line)
+    if field_match:
+        field_name, row_name, old_value, new_value = field_match.groups()
+        return "• <b>{}</b> у {}\n  <b>Было:</b> <code>{}</code>\n  <b>Стало:</b> <code>{}</code>".format(
+            h(field_name),
+            h(row_name),
+            h(old_value),
+            h(new_value),
+        )
+
+    position_match = re.match(r"^Изменена должность у (.+?): было «(.*?)», стало «(.*?)»\.$", line)
+    if position_match:
+        row_name, old_value, new_value = position_match.groups()
+        return "• <b>Должность</b> у {}\n  <b>Было:</b> <code>{}</code>\n  <b>Стало:</b> <code>{}</code>".format(
+            h(row_name),
+            h(old_value),
+            h(new_value),
+        )
+
+    added_match = re.match(r"^(.+?): добавлена строка «(.+?)»\.$", line)
+    if added_match:
+        _sheet, row_name = added_match.groups()
+        return "• <b>Добавлена строка:</b> {}".format(h(row_name))
+
+    deleted_match = re.match(r"^(.+?): удалена строка «(.+?)»\.$", line)
+    if deleted_match:
+        _sheet, row_name = deleted_match.groups()
+        return "• <b>Удалена строка:</b> {}".format(h(row_name))
+
+    return "• {}".format(h(line))
 
 
 def cell(rows, row_index, col_index):
@@ -544,11 +651,11 @@ def check_sheet(sheet, state, args):
     if old_hash and old_hash != current["hash"]:
         message = build_change_summary(label, previous, current)
         log("Обновление: {} ({})".format(label, message.splitlines()[0] if message else "есть изменения"))
-        try_send_telegram(args, "Обновилась Google Sheet", message, subtitle=label, url=sheet["url"], sheet=sheet)
+        notify(args, "TS26: обновилась таблица", message, subtitle=label, url=sheet["url"], sheet=sheet)
     elif not old_hash:
         log("Первый снимок: {} (строк: {}, {} байт)".format(label, current["rows"], current["bytes"]))
         if args.notify_initial:
-            try_send_telegram(args, "Монитор Google Sheets запущен", "Первый снимок сохранен; строк: {}".format(current["rows"]), subtitle=label, url=sheet["url"], sheet=sheet)
+            notify(args, "TS26: монитор запущен", "Первый снимок сохранен; строк: {}".format(current["rows"]), subtitle=label, url=sheet["url"], sheet=sheet)
     elif not args.quiet:
         log("Без изменений: {} (строк: {})".format(label, current["rows"]))
 
@@ -567,7 +674,7 @@ def check_all(sheets, state, args):
             message = str(exc)
             log("Ошибка: {} - {}".format(sheet["label"], message))
             if previous.get("error") != message:
-                try_send_telegram(args, "Ошибка монитора Google Sheets", message, subtitle=sheet["label"], url=sheet["url"], sheet=sheet)
+                notify(args, "TS26: ошибка монитора", message, subtitle=sheet["label"], url=sheet["url"], sheet=sheet)
             previous.update({
                 "label": sheet["label"],
                 "url": sheet["url"],
@@ -584,7 +691,7 @@ def send_startup_message(args, sheets):
     message = "Бот запущен. Отслеживается таблиц: {}. Интервал проверки: {} сек.".format(len(sheets), args.interval)
     if labels:
         message = "{}\n{}".format(message, labels)
-    try_send_telegram(args, "Монитор Google Sheets активен", message)
+    notify(args, "TS26: монитор активен", message)
 
 
 def build_parser():
@@ -603,6 +710,8 @@ def build_parser():
     parser.add_argument("--startup-message", action="store_true", default=DEFAULT_STARTUP_MESSAGE, help="Отправить Telegram-сообщение при запуске.")
     parser.add_argument("--print-chat-ids", action="store_true", help="Показать chat_id из последних сообщений боту и выйти.")
     parser.add_argument("--no-telegram", action="store_true", help="Не отправлять Telegram-сообщения, только писать лог.")
+    parser.add_argument("--no-macos-notifications", action="store_true", default=not DEFAULT_MACOS_NOTIFICATIONS, help="Не показывать системные уведомления macOS.")
+    parser.add_argument("--no-notifications", action="store_true", help="Не отправлять ни Telegram, ни системные уведомления macOS.")
     parser.add_argument("--quiet", action="store_true", help="Не писать в лог проверки без изменений.")
     return parser
 
@@ -613,6 +722,9 @@ def main(argv=None):
         raise SystemExit("Интервал меньше 5 секунд слишком агрессивен для Google Sheets.")
     if args.duration < 0:
         raise SystemExit("Duration не может быть отрицательным.")
+    if args.no_notifications:
+        args.no_telegram = True
+        args.no_macos_notifications = True
     load_dotenv(args.env)
     if args.print_chat_ids:
         print_chat_ids(args)
