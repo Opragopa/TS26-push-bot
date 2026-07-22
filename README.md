@@ -157,6 +157,7 @@ python3 tg_sheet_monitor.py --once --no-telegram
    TELEGRAM_CHAT_ID=ваш_основной_chat_id
    TELEGRAM_ADMIN_CHAT_IDS=ваш_основной_chat_id
    GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+   # или GOOGLE_OAUTH_USER_JSON={"type":"authorized_user",...}
    PLAQUE_FORM_ENABLED=true
    SHEET_MONITOR_INTERVAL=120
    SHEET_MONITOR_DURATION_SECONDS=0
@@ -231,7 +232,11 @@ https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff
 - если имени нет, пишет в первую свободную строку начиная с `280`;
 - в `A` пишет имя, в `B` должность, в `E` пометку `<-- добавлено через ТГ бота`.
 
-Для записи в Google Sheets нужен сервисный аккаунт Google:
+Для записи в Google Sheets есть два варианта авторизации.
+
+### Вариант 1: сервисный аккаунт
+
+Это самый безопасный вариант для хостинга: бот пишет как отдельный технический аккаунт.
 
 1. Создайте service account в Google Cloud.
 2. Скачайте JSON-ключ.
@@ -241,6 +246,33 @@ https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff
    ```text
    GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"..."}
    ```
+
+### Вариант 2: ваш Google-аккаунт
+
+Если нужно, чтобы бот писал от вашего аккаунта и пользователи не заходили в Google Sheets, используйте OAuth refresh token.
+
+1. В Google Cloud создайте OAuth Client ID типа `Desktop app`.
+2. Скачайте JSON и сохраните локально рядом с проектом как `oauth_client.json`.
+3. Локально установите зависимости:
+
+   ```bash
+   python3 -m pip install -r requirements.txt
+   ```
+
+4. Запустите:
+
+   ```bash
+   python3 make_google_oauth_token.py
+   ```
+
+5. Откроется браузер Google. Войдите своим аккаунтом и разрешите доступ к Google Sheets.
+6. Скрипт напечатает JSON. Скопируйте его в Bothost как переменную:
+
+   ```text
+   GOOGLE_OAUTH_USER_JSON={"type":"authorized_user","client_id":"...","client_secret":"...","refresh_token":"..."}
+   ```
+
+Этот токен позволяет боту редактировать таблицы от вашего имени в рамках доступа `spreadsheets`. Храните его как секрет и не коммитьте в Git.
 
 Настройки формы можно менять переменными:
 

@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.7"
+APP_VERSION = "2026-07-22.8"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -753,24 +753,35 @@ def send_plaque_confirmation(args, state, chat_id):
 
 
 def get_google_client():
-    credentials_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-    credentials_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
-    if not credentials_json and not credentials_file:
-        raise ConfigError("Для записи в Google Sheets задайте GOOGLE_SERVICE_ACCOUNT_JSON или GOOGLE_SERVICE_ACCOUNT_FILE.")
+    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+    oauth_user_json = os.environ.get("GOOGLE_OAUTH_USER_JSON", "").strip()
+    oauth_user_file = os.environ.get("GOOGLE_OAUTH_USER_FILE", "").strip()
+    if not any([service_account_json, service_account_file, oauth_user_json, oauth_user_file]):
+        raise ConfigError("Для записи в Google Sheets задайте GOOGLE_SERVICE_ACCOUNT_JSON/FILE или GOOGLE_OAUTH_USER_JSON/FILE.")
     try:
         import gspread
+        from google.oauth2.credentials import Credentials as UserCredentials
         from google.oauth2.service_account import Credentials
     except ImportError as exc:
         raise ConfigError("Не установлены зависимости для Google Sheets. Проверьте requirements.txt на хостинге: {}".format(exc))
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    if credentials_json:
+    if oauth_user_json:
         try:
-            info = json.loads(credentials_json)
+            info = json.loads(oauth_user_json)
+        except ValueError as exc:
+            raise ConfigError("GOOGLE_OAUTH_USER_JSON не похож на JSON: {}".format(exc))
+        credentials = UserCredentials.from_authorized_user_info(info, scopes=scopes)
+    elif oauth_user_file:
+        credentials = UserCredentials.from_authorized_user_file(oauth_user_file, scopes=scopes)
+    elif service_account_json:
+        try:
+            info = json.loads(service_account_json)
         except ValueError as exc:
             raise ConfigError("GOOGLE_SERVICE_ACCOUNT_JSON не похож на JSON: {}".format(exc))
         credentials = Credentials.from_service_account_info(info, scopes=scopes)
     else:
-        credentials = Credentials.from_service_account_file(credentials_file, scopes=scopes)
+        credentials = Credentials.from_service_account_file(service_account_file, scopes=scopes)
     return gspread.authorize(credentials)
 
 
