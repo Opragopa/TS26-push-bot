@@ -25,6 +25,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
+APP_VERSION = "2026-07-22.3"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -316,6 +317,7 @@ def send_telegram(args, title, message, subtitle="", url="", sheet=None):
         }
         try:
             telegram_request(token, "sendMessage", payload, args.timeout)
+            log("Telegram отправлен: chat_id={}, title={}".format(chat_id, title))
         except MonitorError as exc:
             errors.append("{}: {}".format(chat_id, exc))
     if errors:
@@ -623,7 +625,11 @@ def main(argv=None):
 
     started_at = time.monotonic()
     duration_text = ", длительность {} сек.".format(args.duration) if args.duration else ""
-    log("Старт монитора: {} таблиц, интервал {} сек.{}".format(len(sheets), args.interval, duration_text))
+    log("Старт монитора v{}: {} таблиц, интервал {} сек.{}".format(APP_VERSION, len(sheets), args.interval, duration_text))
+    log("Файл состояния: {}".format(state_path))
+    log("Основные Telegram chat_id: {}".format(", ".join(default_chat_ids()) or "не заданы"))
+    for sheet in sheets:
+        log("Получатели для {}: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet)) or "не заданы"))
     if args.startup_message:
         send_startup_message(args, sheets)
     while True:
