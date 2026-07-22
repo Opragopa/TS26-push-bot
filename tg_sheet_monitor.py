@@ -29,6 +29,7 @@ DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.g
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
 DEFAULT_INTERVAL_SECONDS = int(os.environ.get("SHEET_MONITOR_INTERVAL", "120"))
+DEFAULT_DURATION_SECONDS = int(os.environ.get("SHEET_MONITOR_DURATION_SECONDS", "0"))
 DEFAULT_NOTIFY_INITIAL = env_bool("SHEET_MONITOR_NOTIFY_INITIAL", False)
 DEFAULT_STARTUP_MESSAGE = env_bool("SHEET_MONITOR_STARTUP_MESSAGE", False)
 USER_AGENT = "tg-pushes-ts26-sheet-monitor/1.0"
@@ -589,6 +590,7 @@ def build_parser():
         description="Фоново проверяет Google Sheets и отправляет Telegram-уведомления при изменениях."
     )
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_SECONDS, help="Интервал проверки в секундах. По умолчанию: %(default)s.")
+    parser.add_argument("--duration", type=int, default=DEFAULT_DURATION_SECONDS, help="Сколько секунд работать и затем выйти. 0 значит без ограничения.")
     parser.add_argument("--timeout", type=int, default=30, help="Таймаут HTTP-запросов в секундах.")
     parser.add_argument("--state", default=str(DEFAULT_STATE_PATH), help="JSON-файл состояния. По умолчанию: %(default)s.")
     parser.add_argument("--sheets", default=str(DEFAULT_SHEETS_PATH), help="JSON-файл со списком таблиц.")
@@ -605,8 +607,10 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.interval < 15:
-        raise SystemExit("Интервал меньше 15 секунд слишком агрессивен для Google Sheets.")
+    if args.interval < 5:
+        raise SystemExit("Интервал меньше 5 секунд слишком агрессивен для Google Sheets.")
+    if args.duration < 0:
+        raise SystemExit("Duration не может быть отрицательным.")
     load_dotenv(args.env)
     if args.print_chat_ids:
         print_chat_ids(args)
@@ -617,13 +621,18 @@ def main(argv=None):
     state_path = Path(args.state).expanduser()
     state = load_state(state_path)
 
-    log("Старт монитора: {} таблиц, интервал {} сек.".format(len(sheets), args.interval))
+    started_at = time.monotonic()
+    duration_text = ", длительность {} сек.".format(args.duration) if args.duration else ""
+    log("Старт монитора: {} таблиц, интервал {} сек.{}".format(len(sheets), args.interval, duration_text))
     if args.startup_message:
         send_startup_message(args, sheets)
     while True:
         if check_all(sheets, state, args):
             save_state(state_path, state)
         if args.once:
+            break
+        if args.duration and time.monotonic() - started_at >= args.duration:
+            log("Монитор завершен по duration: {} сек.".format(args.duration))
             break
         time.sleep(args.interval)
 

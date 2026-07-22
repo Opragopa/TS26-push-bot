@@ -131,11 +131,12 @@ python3 tg_sheet_monitor.py --once --no-telegram
    TELEGRAM_BOT_TOKEN=ваш_токен_от_BotFather
    TELEGRAM_CHAT_ID=ваш_основной_chat_id
    SHEET_MONITOR_INTERVAL=120
+   SHEET_MONITOR_DURATION_SECONDS=0
    SHEET_MONITOR_DATA_DIR=data
    SHEET_MONITOR_STARTUP_MESSAGE=true
    ```
 
-   `SHEET_MONITOR_INTERVAL`, `SHEET_MONITOR_DATA_DIR` и `SHEET_MONITOR_STARTUP_MESSAGE` можно не указывать. `SHEET_MONITOR_STARTUP_MESSAGE=true` удобно включать только для теста: бот пришлет сообщение сразу после старта.
+   `SHEET_MONITOR_INTERVAL`, `SHEET_MONITOR_DURATION_SECONDS`, `SHEET_MONITOR_DATA_DIR` и `SHEET_MONITOR_STARTUP_MESSAGE` можно не указывать. `SHEET_MONITOR_STARTUP_MESSAGE=true` удобно включать только для теста: бот пришлет сообщение сразу после старта.
 
 7. Нажмите деплой/запуск и откройте логи.
 
@@ -161,6 +162,30 @@ SHEET_MONITOR_STARTUP_MESSAGE=true
 SHEET_MONITOR_NOTIFY_INITIAL=true
 ```
 
+## Тестовый частый мониторинг
+
+Для обычной работы оставьте интервал 120 секунд или больше. Для короткого теста можно временно поставить:
+
+```text
+SHEET_MONITOR_INTERVAL=10
+SHEET_MONITOR_DURATION_SECONDS=300
+SHEET_MONITOR_STARTUP_MESSAGE=true
+```
+
+Так бот будет проверять таблицы каждые 10 секунд и сам завершится через 5 минут. После теста верните:
+
+```text
+SHEET_MONITOR_INTERVAL=120
+SHEET_MONITOR_DURATION_SECONDS=0
+SHEET_MONITOR_STARTUP_MESSAGE=false
+```
+
+Локально такой же тест:
+
+```bash
+python3 main.py --interval 10 --duration 300 --startup-message
+```
+
 ## Параметры
 
 ```bash
@@ -170,6 +195,7 @@ python3 tg_sheet_monitor.py --help
 Основные флаги:
 
 - `--interval 120` - интервал проверки в секундах.
+- `--duration 300` - работать заданное число секунд и выйти; `0` значит без ограничения.
 - `--sheet "Название=https://docs.google.com/..."` - задать таблицы через CLI вместо `sheets.json`.
 - `--state state/sheet_state.json` - путь к файлу состояния.
 - `--quiet` - не печатать проверки без изменений.
