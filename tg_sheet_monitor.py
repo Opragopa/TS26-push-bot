@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.15"
+APP_VERSION = "2026-07-22.16"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -294,13 +294,88 @@ def default_chat_ids():
     return result
 
 
-def recipient_chat_ids(sheet=None):
+def is_content_plan_sheet(sheet):
+    return normalize_header((sheet or {}).get("label", "")) == normalize_header("Контент-план")
+
+
+def content_plan_chat_ids(state):
+    chat_ids = state.setdefault("_content_plan_chat_ids", [])
+    if not isinstance(chat_ids, list):
+        state["_content_plan_chat_ids"] = []
+    result = []
+    for chat_id in state["_content_plan_chat_ids"]:
+        chat_id = str(chat_id).strip()
+        if chat_id and chat_id not in result:
+            result.append(chat_id)
+    state["_content_plan_chat_ids"] = result
+    return result
+
+
+def add_content_plan_chat_id(state, chat_id):
+    chat_id = str(chat_id).strip()
+    if not re.fullmatch(r"-?\d+", chat_id):
+        raise ConfigError("chat_id должен быть числом.")
+    chat_ids = content_plan_chat_ids(state)
+    if chat_id not in chat_ids:
+        chat_ids.append(chat_id)
+    state["_content_plan_chat_ids"] = chat_ids
+    return chat_id
+
+
+def remove_content_plan_chat_id(state, chat_id):
+    chat_id = str(chat_id).strip()
+    chat_ids = content_plan_chat_ids(state)
+    state["_content_plan_chat_ids"] = [item for item in chat_ids if item != chat_id]
+    return chat_id
+
+
+def known_chats(state):
+    chats = state.setdefault("_known_chats", {})
+    if not isinstance(chats, dict):
+        state["_known_chats"] = {}
+    return state["_known_chats"]
+
+
+def remember_chat(state, chat):
+    if not isinstance(chat, dict):
+        return False
+    chat_id = chat.get("id")
+    if chat_id is None:
+        return False
+    chat_id = str(chat_id).strip()
+    if not chat_id:
+        return False
+    title = chat.get("title") or " ".join([item for item in [chat.get("first_name"), chat.get("last_name")] if item]).strip()
+    username = chat.get("username") or ""
+    current = known_chats(state).get(chat_id, {})
+    updated = {
+        "title": normalize_space(title) or current.get("title", ""),
+        "username": normalize_space(username) or current.get("username", ""),
+        "type": chat.get("type") or current.get("type", ""),
+        "seen_at": now_text(),
+    }
+    changed = current != updated
+    known_chats(state)[chat_id] = updated
+    return changed
+
+
+def known_chat_label(chat_id, data):
+    title = data.get("title") or "без имени"
+    username = data.get("username")
+    if username:
+        return "{} (@{})".format(title, username)
+    return title
+
+
+def recipient_chat_ids(sheet=None, state=None):
     sheet = sheet or {}
     if sheet.get("chat_ids"):
         chat_ids = list(sheet["chat_ids"])
     else:
         chat_ids = default_chat_ids()
         chat_ids.extend(sheet.get("extra_chat_ids") or [])
+        if state is not None and is_content_plan_sheet(sheet):
+            chat_ids.extend(content_plan_chat_ids(state))
     result = []
     for chat_id in chat_ids:
         chat_id = str(chat_id).strip()
@@ -318,20 +393,20 @@ def is_admin_chat_id(chat_id):
     return str(chat_id).strip() in admin_chat_ids()
 
 
-def known_service_chat_ids(sheets):
+def known_service_chat_ids(sheets, state=None):
     known = set(admin_chat_ids())
     known.update(default_chat_ids())
     for sheet in sheets:
-        known.update(recipient_chat_ids(sheet))
+        known.update(recipient_chat_ids(sheet, state=state))
     return {str(item).strip() for item in known if str(item).strip()}
 
 
-def send_telegram(args, title, message, subtitle="", url="", sheet=None):
+def send_telegram(args, title, message, subtitle="", url="", sheet=None, state=None):
     if args.no_telegram:
         log("Telegram выключен: {} - {}".format(title, message))
         return
     token = get_required_telegram_token()
-    chat_ids = recipient_chat_ids(sheet)
+    chat_ids = recipient_chat_ids(sheet, state=state)
     if not chat_ids:
         raise ConfigError("Заполните TELEGRAM_CHAT_ID или TELEGRAM_CHAT_IDS в .env/окружении. chat_id можно узнать через --print-chat-ids.")
     send_telegram_to_chat_ids(args, chat_ids, title, message, subtitle=subtitle, url=url)
@@ -399,14 +474,14 @@ def send_macos_notification(args, title, message, subtitle=""):
         return False
 
 
-def notify(args, title, message, subtitle="", url="", sheet=None):
+def notify(args, title, message, subtitle="", url="", sheet=None, state=None):
     send_macos_notification(args, title, message, subtitle=subtitle)
-    return try_send_telegram(args, title, message, subtitle=subtitle, url=url, sheet=sheet)
+    return try_send_telegram(args, title, message, subtitle=subtitle, url=url, sheet=sheet, state=state)
 
 
-def try_send_telegram(args, title, message, subtitle="", url="", sheet=None):
+def try_send_telegram(args, title, message, subtitle="", url="", sheet=None, state=None):
     try:
-        send_telegram(args, title, message, subtitle=subtitle, url=url, sheet=sheet)
+        send_telegram(args, title, message, subtitle=subtitle, url=url, sheet=sheet, state=state)
         return True
     except (MonitorError, ConfigError) as exc:
         log("Не удалось отправить Telegram-сообщение: {}".format(exc))
@@ -539,6 +614,9 @@ def admin_keyboard():
                 {"text": "Получатели", "callback_data": "dbg:recipients"},
             ],
             [
+                {"text": "Контент-доступ", "callback_data": "dbg:content_access"},
+            ],
+            [
                 {"text": "Тест Контент-план", "callback_data": "dbg:test:Контент-план"},
                 {"text": "Тест План записи", "callback_data": "dbg:test:План записи"},
             ],
@@ -612,13 +690,40 @@ def find_sheet_by_label(sheets, label):
     return None
 
 
-def recipients_report(sheets):
+def recipients_report(sheets, state=None):
     lines = []
     lines.append("Админы: {}".format(", ".join(admin_chat_ids()) or "не заданы"))
     lines.append("Основные получатели: {}".format(", ".join(default_chat_ids()) or "не заданы"))
+    if state is not None:
+        lines.append("Контент-план через бота: {}".format(", ".join(content_plan_chat_ids(state)) or "не добавлены"))
     for sheet in sheets:
-        lines.append("{}: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet)) or "не заданы"))
+        lines.append("{}: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы"))
     return "\n".join(lines)
+
+
+def content_access_report(state):
+    chat_ids = content_plan_chat_ids(state)
+    recent_lines = []
+    for chat_id, data in sorted(known_chats(state).items(), key=lambda item: item[1].get("seen_at", ""), reverse=True):
+        if chat_id in admin_chat_ids():
+            continue
+        marker = "уже добавлен" if chat_id in chat_ids else "не добавлен"
+        recent_lines.append("{} - {} - {}".format(chat_id, known_chat_label(chat_id, data), marker))
+        if len(recent_lines) >= 10:
+            break
+    return (
+        "Доступ к Контент-плану через бота.\n\n"
+        "Добавленные chat_id: {}\n\n"
+        "Последние пользователи:\n"
+        "{}\n\n"
+        "Добавить:\n"
+        "/add_content_user 415835819\n\n"
+        "Удалить:\n"
+        "/remove_content_user 415835819\n\n"
+        "Показать список:\n"
+        "/content_users\n\n"
+        "Человек должен хотя бы один раз написать боту, иначе Telegram может запретить отправку."
+    ).format(", ".join(chat_ids) or "не добавлены", "\n".join(recent_lines) or "пока нет")
 
 
 def status_report(args, sheets, state):
@@ -641,15 +746,15 @@ def status_report(args, sheets, state):
 
 
 def send_debug_menu(args, chat_id, sheets, state):
-    message = "{}\n\n{}".format(status_report(args, sheets, state), recipients_report(sheets))
+    message = "{}\n\n{}".format(status_report(args, sheets, state), recipients_report(sheets, state=state))
     send_admin_message(args, chat_id, "TS26: debug-панель", message, reply_markup=admin_keyboard())
 
 
-def send_test_to_sheet(args, chat_id, sheet):
-    message = "Тестовая отправка из debug-панели.\nПолучатели: {}".format(", ".join(recipient_chat_ids(sheet)) or "не заданы")
+def send_test_to_sheet(args, chat_id, sheet, state=None):
+    message = "Тестовая отправка из debug-панели.\nПолучатели: {}".format(", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы")
     try:
-        send_telegram(args, "TS26: тест уведомления", message, subtitle=sheet["label"], url=sheet["url"], sheet=sheet)
-        send_admin_message(args, chat_id, "TS26: тест отправлен", "Таблица: {}\nПолучатели: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet)) or "не заданы"), reply_markup=admin_keyboard())
+        send_telegram(args, "TS26: тест уведомления", message, subtitle=sheet["label"], url=sheet["url"], sheet=sheet, state=state)
+        send_admin_message(args, chat_id, "TS26: тест отправлен", "Таблица: {}\nПолучатели: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы"), reply_markup=admin_keyboard())
     except (MonitorError, ConfigError) as exc:
         send_admin_message(args, chat_id, "TS26: ошибка теста", "Таблица: {}\n{}".format(sheet["label"], exc), reply_markup=admin_keyboard())
 
@@ -711,9 +816,11 @@ def handle_admin_callback(args, sheets, state, callback):
     if data == "dbg:status":
         send_admin_message(args, chat_id, "TS26: статус", status_report(args, sheets, state), reply_markup=admin_keyboard())
     elif data == "dbg:recipients":
-        send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets), reply_markup=admin_keyboard())
+        send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets, state=state), reply_markup=admin_keyboard())
+    elif data == "dbg:content_access":
+        send_admin_message(args, chat_id, "TS26: Контент-доступ", content_access_report(state), reply_markup=admin_keyboard())
     elif data == "dbg:test:startup":
-        send_startup_message(args, sheets)
+        send_startup_message(args, sheets, state=state)
         send_admin_message(args, chat_id, "TS26: тест старта", "Стартовое сообщение отправлено основным получателям.", reply_markup=admin_keyboard())
     elif data == "dbg:google_access":
         try:
@@ -729,7 +836,7 @@ def handle_admin_callback(args, sheets, state, callback):
         label = data.split(":", 2)[2]
         sheet = find_sheet_by_label(sheets, label)
         if sheet:
-            send_test_to_sheet(args, chat_id, sheet)
+            send_test_to_sheet(args, chat_id, sheet, state=state)
         else:
             send_admin_message(args, chat_id, "TS26: ошибка", "Не нашел таблицу: {}".format(label), reply_markup=admin_keyboard())
     else:
@@ -763,7 +870,28 @@ def handle_admin_message(args, sheets, state, message):
     elif command == "/status":
         send_admin_message(args, chat_id, "TS26: статус", status_report(args, sheets, state), reply_markup=admin_keyboard())
     elif command == "/recipients":
-        send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets), reply_markup=admin_keyboard())
+        send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets, state=state), reply_markup=admin_keyboard())
+    elif command == "/content_users":
+        send_admin_message(args, chat_id, "TS26: Контент-доступ", content_access_report(state), reply_markup=admin_keyboard())
+    elif command in {"/add_content_user", "/remove_content_user"}:
+        parts = text.split()
+        if len(parts) < 2:
+            send_admin_message(args, chat_id, "TS26: Контент-доступ", "Укажите chat_id.\nНапример:\n{} 415835819".format(command), reply_markup=admin_keyboard())
+            return True
+        try:
+            target_chat_id = add_content_plan_chat_id(state, parts[1]) if command == "/add_content_user" else remove_content_plan_chat_id(state, parts[1])
+        except ConfigError as exc:
+            send_admin_message(args, chat_id, "TS26: ошибка", str(exc), reply_markup=admin_keyboard())
+            return True
+        action_text = "добавлен" if command == "/add_content_user" else "удален"
+        send_admin_message(args, chat_id, "TS26: Контент-доступ", "chat_id {} {} для Контент-плана.\n\n{}".format(target_chat_id, action_text, content_access_report(state)), reply_markup=admin_keyboard())
+        if command == "/add_content_user":
+            sheet = find_sheet_by_label(sheets, "Контент-план")
+            if sheet:
+                try:
+                    send_telegram_to_chat_ids(args, [target_chat_id], "TS26: доступ к Контент-плану", "Вы добавлены в уведомления Контент-плана. Уведомления по Плану записи приходить не будут.", subtitle="Контент-план")
+                except (MonitorError, ConfigError) as exc:
+                    send_admin_message(args, chat_id, "TS26: ошибка теста", "chat_id добавлен, но тестовое сообщение не отправилось:\n{}".format(exc), reply_markup=admin_keyboard())
     elif command == "/preview_user":
         send_plaque_preview(args, chat_id)
     elif command in {"/user", "/user_mode", "/plaque_mode"}:
@@ -777,11 +905,11 @@ def handle_admin_message(args, sheets, state, message):
     elif command == "/test_content":
         sheet = find_sheet_by_label(sheets, "Контент-план")
         if sheet:
-            send_test_to_sheet(args, chat_id, sheet)
+            send_test_to_sheet(args, chat_id, sheet, state=state)
     elif command == "/test_recording":
         sheet = find_sheet_by_label(sheets, "План записи")
         if sheet:
-            send_test_to_sheet(args, chat_id, sheet)
+            send_test_to_sheet(args, chat_id, sheet, state=state)
     else:
         if is_user_mode_chat(state, chat_id):
             return False
@@ -826,7 +954,7 @@ def set_user_mode_chat(state, chat_id, enabled):
 def can_use_plaque_form(sheets, state, chat_id):
     if is_user_mode_chat(state, chat_id):
         return True
-    return not (is_admin_chat_id(chat_id) or str(chat_id) in known_service_chat_ids(sheets))
+    return not (is_admin_chat_id(chat_id) or str(chat_id) in known_service_chat_ids(sheets, state=state))
 
 
 def normalize_person_name(value):
@@ -1180,10 +1308,12 @@ def poll_admin_updates(args, sheets, state):
         try:
             if "callback_query" in update:
                 callback = update["callback_query"]
+                changed = remember_chat(state, callback.get("message", {}).get("chat") or callback.get("from") or {}) or changed
                 changed = handle_admin_callback(args, sheets, state, callback) or changed
                 changed = handle_plaque_callback(args, sheets, state, callback) or changed
             elif "message" in update:
                 message = update["message"]
+                changed = remember_chat(state, message.get("chat") or {}) or changed
                 changed = handle_admin_message(args, sheets, state, message) or changed
                 changed = handle_plaque_message(args, sheets, state, message) or changed
         except (MonitorError, ConfigError) as exc:
@@ -1410,11 +1540,11 @@ def check_sheet(sheet, state, args):
     if old_hash and old_hash != current["hash"]:
         message = build_change_summary(label, previous, current)
         log("Обновление: {} ({})".format(label, message.splitlines()[0] if message else "есть изменения"))
-        notify(args, "TS26: обновилась таблица", message, subtitle=label, url=sheet["url"], sheet=sheet)
+        notify(args, "TS26: обновилась таблица", message, subtitle=label, url=sheet["url"], sheet=sheet, state=state)
     elif not old_hash:
         log("Первый снимок: {} (строк: {}, {} байт)".format(label, current["rows"], current["bytes"]))
         if args.notify_initial:
-            notify(args, "TS26: монитор запущен", "Первый снимок сохранен; строк: {}".format(current["rows"]), subtitle=label, url=sheet["url"], sheet=sheet)
+            notify(args, "TS26: монитор запущен", "Первый снимок сохранен; строк: {}".format(current["rows"]), subtitle=label, url=sheet["url"], sheet=sheet, state=state)
     elif not args.quiet:
         log("Без изменений: {} (строк: {})".format(label, current["rows"]))
 
@@ -1433,7 +1563,7 @@ def check_all(sheets, state, args):
             message = str(exc)
             log("Ошибка: {} - {}".format(sheet["label"], message))
             if previous.get("error") != message:
-                notify(args, "TS26: ошибка монитора", message, subtitle=sheet["label"], url=sheet["url"], sheet=sheet)
+                notify(args, "TS26: ошибка монитора", message, subtitle=sheet["label"], url=sheet["url"], sheet=sheet, state=state)
             previous.update({
                 "label": sheet["label"],
                 "url": sheet["url"],
@@ -1445,12 +1575,12 @@ def check_all(sheets, state, args):
     return changed_state
 
 
-def send_startup_message(args, sheets):
+def send_startup_message(args, sheets, state=None):
     labels = ", ".join([sheet["label"] for sheet in sheets])
     message = "Бот запущен. Отслеживается таблиц: {}. Интервал проверки: {} сек.".format(len(sheets), args.interval)
     if labels:
         message = "{}\n{}".format(message, labels)
-    notify(args, "TS26: монитор активен", message)
+    notify(args, "TS26: монитор активен", message, state=state)
 
 
 def build_parser():
@@ -1502,9 +1632,9 @@ def main(argv=None):
     log("Файл состояния: {}".format(state_path))
     log("Основные Telegram chat_id: {}".format(", ".join(default_chat_ids()) or "не заданы"))
     for sheet in sheets:
-        log("Получатели для {}: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet)) or "не заданы"))
+        log("Получатели для {}: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы"))
     if args.startup_message:
-        send_startup_message(args, sheets)
+        send_startup_message(args, sheets, state=state)
     if poll_admin_updates(args, sheets, state):
         save_state(state_path, state)
     while True:
