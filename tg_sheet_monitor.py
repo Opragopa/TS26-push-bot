@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.4"
+APP_VERSION = "2026-07-22.5"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -36,6 +36,7 @@ DEFAULT_DURATION_SECONDS = int(os.environ.get("SHEET_MONITOR_DURATION_SECONDS", 
 DEFAULT_NOTIFY_INITIAL = env_bool("SHEET_MONITOR_NOTIFY_INITIAL", False)
 DEFAULT_STARTUP_MESSAGE = env_bool("SHEET_MONITOR_STARTUP_MESSAGE", False)
 DEFAULT_MACOS_NOTIFICATIONS = env_bool("SHEET_MONITOR_MACOS_NOTIFICATIONS", True)
+DEFAULT_ADMIN_BUTTONS = env_bool("SHEET_MONITOR_ADMIN_BUTTONS", True)
 USER_AGENT = "tg-pushes-ts26-sheet-monitor/1.0"
 MAX_CHANGE_MESSAGES = 12
 MAX_MACOS_BODY_LENGTH = 220
@@ -298,6 +299,15 @@ def recipient_chat_ids(sheet=None):
     return result
 
 
+def admin_chat_ids():
+    configured = split_env_list(os.environ.get("TELEGRAM_ADMIN_CHAT_IDS", ""))
+    return configured or default_chat_ids()
+
+
+def is_admin_chat_id(chat_id):
+    return str(chat_id).strip() in admin_chat_ids()
+
+
 def send_telegram(args, title, message, subtitle="", url="", sheet=None):
     if args.no_telegram:
         log("Telegram выключен: {} - {}".format(title, message))
@@ -306,6 +316,14 @@ def send_telegram(args, title, message, subtitle="", url="", sheet=None):
     chat_ids = recipient_chat_ids(sheet)
     if not chat_ids:
         raise ConfigError("Заполните TELEGRAM_CHAT_ID или TELEGRAM_CHAT_IDS в .env/окружении. chat_id можно узнать через --print-chat-ids.")
+    send_telegram_to_chat_ids(args, chat_ids, title, message, subtitle=subtitle, url=url)
+
+
+def send_telegram_to_chat_ids(args, chat_ids, title, message, subtitle="", url="", reply_markup=None):
+    if args.no_telegram:
+        log("Telegram выключен: {} - {}".format(title, message))
+        return
+    token = get_required_telegram_token()
     text = render_telegram_message(title, message, subtitle=subtitle, url=url)
     errors = []
     for chat_id in chat_ids:
@@ -315,6 +333,8 @@ def send_telegram(args, title, message, subtitle="", url="", sheet=None):
             "parse_mode": TELEGRAM_PARSE_MODE,
             "disable_web_page_preview": "true" if env_bool("TELEGRAM_DISABLE_WEB_PAGE_PREVIEW", True) else "false",
         }
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
         try:
             telegram_request(token, "sendMessage", payload, args.timeout)
             log("Telegram отправлен: chat_id={}, title={}".format(chat_id, title))
@@ -442,6 +462,172 @@ def render_telegram_change_line(line):
         return "• <b>Удалена строка:</b> {}".format(h(row_name))
 
     return "• {}".format(h(line))
+
+
+def admin_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Статус", "callback_data": "dbg:status"},
+                {"text": "Получатели", "callback_data": "dbg:recipients"},
+            ],
+            [
+                {"text": "Тест Контент-план", "callback_data": "dbg:test:Контент-план"},
+                {"text": "Тест План записи", "callback_data": "dbg:test:План записи"},
+            ],
+            [
+                {"text": "Тест старта", "callback_data": "dbg:test:startup"},
+            ],
+        ]
+    }
+
+
+def send_admin_message(args, chat_id, title, message, reply_markup=None):
+    send_telegram_to_chat_ids(args, [str(chat_id)], title, message, reply_markup=reply_markup)
+
+
+def answer_callback(args, callback_id, text="Готово"):
+    if not callback_id:
+        return
+    try:
+        telegram_request(get_required_telegram_token(), "answerCallbackQuery", {"callback_query_id": callback_id, "text": text}, args.timeout)
+    except (MonitorError, ConfigError) as exc:
+        log("Не удалось ответить на callback: {}".format(exc))
+
+
+def find_sheet_by_label(sheets, label):
+    wanted = normalize_header(label)
+    for sheet in sheets:
+        if normalize_header(sheet["label"]) == wanted:
+            return sheet
+    return None
+
+
+def recipients_report(sheets):
+    lines = []
+    lines.append("Админы: {}".format(", ".join(admin_chat_ids()) or "не заданы"))
+    lines.append("Основные получатели: {}".format(", ".join(default_chat_ids()) or "не заданы"))
+    for sheet in sheets:
+        lines.append("{}: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet)) or "не заданы"))
+    return "\n".join(lines)
+
+
+def status_report(args, sheets, state):
+    lines = [
+        "Версия: {}".format(APP_VERSION),
+        "Интервал: {} сек.".format(args.interval),
+        "Длительность: {} сек.".format(args.duration) if args.duration else "Длительность: без ограничения",
+        "Админ-кнопки: {}".format("включены" if not args.no_admin_buttons else "выключены"),
+    ]
+    for sheet in sheets:
+        saved = state.get(sheet_key(sheet), {})
+        checked = saved.get("checked_at") or "еще не проверялась"
+        rows = saved.get("rows", "н/д")
+        error = saved.get("error") or "нет"
+        lines.append("{}: строк {}, проверка {}, ошибка: {}".format(sheet["label"], rows, checked, error))
+    return "\n".join(lines)
+
+
+def send_debug_menu(args, chat_id, sheets, state):
+    message = "{}\n\n{}".format(status_report(args, sheets, state), recipients_report(sheets))
+    send_admin_message(args, chat_id, "TS26: debug-панель", message, reply_markup=admin_keyboard())
+
+
+def send_test_to_sheet(args, chat_id, sheet):
+    message = "Тестовая отправка из debug-панели.\nПолучатели: {}".format(", ".join(recipient_chat_ids(sheet)) or "не заданы")
+    try:
+        send_telegram(args, "TS26: тест уведомления", message, subtitle=sheet["label"], url=sheet["url"], sheet=sheet)
+        send_admin_message(args, chat_id, "TS26: тест отправлен", "Таблица: {}\nПолучатели: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet)) or "не заданы"), reply_markup=admin_keyboard())
+    except (MonitorError, ConfigError) as exc:
+        send_admin_message(args, chat_id, "TS26: ошибка теста", "Таблица: {}\n{}".format(sheet["label"], exc), reply_markup=admin_keyboard())
+
+
+def handle_admin_callback(args, sheets, state, callback):
+    callback_id = callback.get("id")
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id") or (callback.get("from") or {}).get("id")
+    data = callback.get("data") or ""
+    if not is_admin_chat_id(chat_id):
+        answer_callback(args, callback_id, "Нет доступа")
+        return False
+    answer_callback(args, callback_id)
+    if data == "dbg:status":
+        send_admin_message(args, chat_id, "TS26: статус", status_report(args, sheets, state), reply_markup=admin_keyboard())
+    elif data == "dbg:recipients":
+        send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets), reply_markup=admin_keyboard())
+    elif data == "dbg:test:startup":
+        send_startup_message(args, sheets)
+        send_admin_message(args, chat_id, "TS26: тест старта", "Стартовое сообщение отправлено основным получателям.", reply_markup=admin_keyboard())
+    elif data.startswith("dbg:test:"):
+        label = data.split(":", 2)[2]
+        sheet = find_sheet_by_label(sheets, label)
+        if sheet:
+            send_test_to_sheet(args, chat_id, sheet)
+        else:
+            send_admin_message(args, chat_id, "TS26: ошибка", "Не нашел таблицу: {}".format(label), reply_markup=admin_keyboard())
+    else:
+        send_debug_menu(args, chat_id, sheets, state)
+    return True
+
+
+def handle_admin_message(args, sheets, state, message):
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    text = normalize_space(message.get("text") or "")
+    if not text or not text.startswith("/"):
+        return False
+    if not is_admin_chat_id(chat_id):
+        log("Команда от не-админа: chat_id={}, text={}".format(chat_id, text))
+        return False
+    command = text.split()[0].split("@", 1)[0].lower()
+    if command in {"/start", "/debug"}:
+        send_debug_menu(args, chat_id, sheets, state)
+    elif command == "/status":
+        send_admin_message(args, chat_id, "TS26: статус", status_report(args, sheets, state), reply_markup=admin_keyboard())
+    elif command == "/recipients":
+        send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets), reply_markup=admin_keyboard())
+    elif command == "/test_content":
+        sheet = find_sheet_by_label(sheets, "Контент-план")
+        if sheet:
+            send_test_to_sheet(args, chat_id, sheet)
+    elif command == "/test_recording":
+        sheet = find_sheet_by_label(sheets, "План записи")
+        if sheet:
+            send_test_to_sheet(args, chat_id, sheet)
+    else:
+        send_debug_menu(args, chat_id, sheets, state)
+    return True
+
+
+def poll_admin_updates(args, sheets, state):
+    if args.no_admin_buttons or args.no_telegram:
+        return False
+    token = get_required_telegram_token()
+    payload = {"timeout": 0, "allowed_updates": json.dumps(["message", "callback_query"])}
+    offset = state.get("_telegram_update_offset")
+    if offset:
+        payload["offset"] = offset
+    try:
+        data = telegram_request(token, "getUpdates", payload, args.timeout)
+    except (MonitorError, ConfigError) as exc:
+        if not args.quiet:
+            log("Не удалось проверить Telegram-команды: {}".format(exc))
+        return False
+    changed = False
+    for update in data.get("result") or []:
+        update_id = update.get("update_id")
+        if update_id is not None:
+            state["_telegram_update_offset"] = max(int(state.get("_telegram_update_offset") or 0), int(update_id) + 1)
+            changed = True
+        try:
+            if "callback_query" in update:
+                changed = handle_admin_callback(args, sheets, state, update["callback_query"]) or changed
+            elif "message" in update:
+                changed = handle_admin_message(args, sheets, state, update["message"]) or changed
+        except (MonitorError, ConfigError) as exc:
+            log("Ошибка обработки Telegram-команды: {}".format(exc))
+    return changed
 
 
 def cell(rows, row_index, col_index):
@@ -710,6 +896,7 @@ def build_parser():
     parser.add_argument("--startup-message", action="store_true", default=DEFAULT_STARTUP_MESSAGE, help="Отправить Telegram-сообщение при запуске.")
     parser.add_argument("--print-chat-ids", action="store_true", help="Показать chat_id из последних сообщений боту и выйти.")
     parser.add_argument("--no-telegram", action="store_true", help="Не отправлять Telegram-сообщения, только писать лог.")
+    parser.add_argument("--no-admin-buttons", action="store_true", default=not DEFAULT_ADMIN_BUTTONS, help="Не читать Telegram-команды и не показывать debug-кнопки.")
     parser.add_argument("--no-macos-notifications", action="store_true", default=not DEFAULT_MACOS_NOTIFICATIONS, help="Не показывать системные уведомления macOS.")
     parser.add_argument("--no-notifications", action="store_true", help="Не отправлять ни Telegram, ни системные уведомления macOS.")
     parser.add_argument("--quiet", action="store_true", help="Не писать в лог проверки без изменений.")
@@ -744,15 +931,24 @@ def main(argv=None):
         log("Получатели для {}: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet)) or "не заданы"))
     if args.startup_message:
         send_startup_message(args, sheets)
+    if poll_admin_updates(args, sheets, state):
+        save_state(state_path, state)
     while True:
         if check_all(sheets, state, args):
             save_state(state_path, state)
         if args.once:
             break
-        if args.duration and time.monotonic() - started_at >= args.duration:
-            log("Монитор завершен по duration: {} сек.".format(args.duration))
-            break
-        time.sleep(args.interval)
+        next_check_at = time.monotonic() + args.interval
+        while True:
+            if args.duration and time.monotonic() - started_at >= args.duration:
+                log("Монитор завершен по duration: {} сек.".format(args.duration))
+                return
+            remaining = next_check_at - time.monotonic()
+            if remaining <= 0:
+                break
+            if poll_admin_updates(args, sheets, state):
+                save_state(state_path, state)
+            time.sleep(min(5, remaining))
 
 
 if __name__ == "__main__":
