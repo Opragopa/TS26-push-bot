@@ -252,7 +252,7 @@ https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff
 Если нужно, чтобы бот писал от вашего аккаунта и пользователи не заходили в Google Sheets, используйте OAuth refresh token.
 
 1. В Google Cloud создайте OAuth Client ID типа `Desktop app`.
-2. Скачайте JSON и сохраните локально рядом с проектом как `oauth_client.json`.
+2. Скачайте JSON и сохраните локально рядом с проектом. Можно не переименовывать: скрипт сам найдёт `client_secret*.json`. Если хотите, можно назвать файл `oauth_client.json`.
 3. Локально установите зависимости:
 
    ```bash
@@ -263,6 +263,12 @@ https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff
 
    ```bash
    python3 make_google_oauth_token.py
+   ```
+
+   Или явно передайте имя файла:
+
+   ```bash
+   python3 make_google_oauth_token.py client_secret_....json
    ```
 
 5. Откроется браузер Google. Войдите своим аккаунтом и разрешите доступ к Google Sheets.
