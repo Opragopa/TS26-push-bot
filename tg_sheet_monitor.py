@@ -27,7 +27,7 @@ def env_bool(name, default=False):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.11"
+APP_VERSION = "2026-07-22.12"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -750,6 +750,10 @@ def handle_admin_message(args, sheets, state, message):
     command = text.split()[0].split("@", 1)[0].lower()
     if is_user_mode_chat(state, chat_id) and command in {"/start", "/add", "/plaque", "/cancel"}:
         return False
+    if command in {"/add", "/plaque"}:
+        send_user_mode_start(args, state, chat_id)
+        ask_plaque_name(args, state, chat_id)
+        return True
     if command in {"/start", "/debug"}:
         if is_user_mode_chat(state, chat_id):
             set_user_mode_chat(state, chat_id, False)
@@ -778,6 +782,8 @@ def handle_admin_message(args, sheets, state, message):
         if sheet:
             send_test_to_sheet(args, chat_id, sheet)
     else:
+        if is_user_mode_chat(state, chat_id):
+            return False
         send_debug_menu(args, chat_id, sheets, state)
     return True
 
