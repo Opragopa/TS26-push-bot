@@ -121,6 +121,17 @@ class HourlyContentPlanTests(unittest.TestCase):
         self.assertEqual(captured[0]["messages"][0]["role"], "system")
         self.assertEqual(captured[0]["messages"][1]["content"], "Контент-план: тестовый diff.")
 
+    def test_hourly_summary_renders_as_telegram_quote(self):
+        message = "{}\nКоротко за час\nИзменена программа закрытия.\n{}\n\nПолный diff\nКонтент-план: строка «10:00», колонка «Зал» - было «пусто», стало «Открытие».".format(
+            monitor.TELEGRAM_QUOTE_START,
+            monitor.TELEGRAM_QUOTE_END,
+        )
+        rendered = monitor.render_telegram_message("TS26: обновления за час", message, subtitle="Контент-план")
+        self.assertIn("<blockquote><b>Коротко за час</b>\nИзменена программа закрытия.</blockquote>", rendered)
+        self.assertIn("<b>Полный diff</b>", rendered)
+        self.assertNotIn(monitor.TELEGRAM_QUOTE_START, rendered)
+        self.assertNotIn(monitor.TELEGRAM_QUOTE_END, rendered)
+
     def test_long_diff_is_chunked_below_telegram_limit(self):
         lines = ["Контент-план: строка «{}», колонка «Зал» - было «пусто», стало «{}».".format(index, "Текст " * 40) for index in range(70)]
         chunks = monitor.telegram_message_chunks("TS26: обновления за час", "\n".join(lines), subtitle="Контент-план")

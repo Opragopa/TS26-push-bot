@@ -39,7 +39,7 @@ def env_int(name, default):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-23.02"
+APP_VERSION = "2026-07-23.03"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -58,6 +58,8 @@ CONTENT_PLAN_DIGEST_STATE_KEY = "_content_plan_hourly_digest"
 CONTENT_PLAN_TIME_ZONE = ZoneInfo("Europe/Moscow")
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
+TELEGRAM_QUOTE_START = "::quote"
+TELEGRAM_QUOTE_END = "::endquote"
 TELEGRAM_PARSE_MODE = "HTML"
 DIFF_BOUNDARY_CHARS = " \t,.;:!?-–—()[]{}«»\"'"
 PLAQUE_SPREADSHEET_ID = os.environ.get("PLAQUE_SPREADSHEET_ID", "1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js")
@@ -764,13 +766,13 @@ def flush_content_plan_digest(args, sheets, state, moment=None):
     change_count = sum(int(event.get("change_count") or 0) for event in events)
     try:
         ai_summary = build_ai_content_plan_summary(full_diff, args.timeout)
-        summary_block = "Коротко за час:\n{}".format(ai_summary)
+        summary_block = "{}\n{}".format("Коротко за час", ai_summary)
         log("AI-сводка Контент-плана готова: событий {}, строк diff {}.".format(event_count, change_count))
     except (MonitorError, ConfigError) as exc:
-        summary_block = "Коротко за час: AI-сводка недоступна, ниже полный diff."
+        summary_block = "{}\nAI-сводка недоступна, ниже полный diff.".format("Коротко за час")
         log("AI-сводка Контент-плана не получена: {}".format(exc))
 
-    message = "{}\n\nПолный diff:\n{}".format(summary_block, full_diff)
+    message = "{}\n{}\n{}\n\nПолный diff\n{}".format(TELEGRAM_QUOTE_START, summary_block, TELEGRAM_QUOTE_END, full_diff)
     try:
         send_macos_notification(args, "TS26: обновления за час", summary_block, subtitle=content_sheet["label"])
         chunks = send_telegram_chunks_to_chat_ids(
@@ -848,15 +850,45 @@ def render_telegram_message(title, message, subtitle="", url=""):
 
 def render_telegram_body(message):
     rendered = []
+    quote_lines = []
+    in_quote = False
     for raw_line in str(message or "").splitlines():
         line = normalize_space(raw_line)
         if not line:
             continue
+        if line == TELEGRAM_QUOTE_START:
+            in_quote = True
+            quote_lines = []
+            continue
+        if line == TELEGRAM_QUOTE_END:
+            if quote_lines:
+                rendered.append(render_telegram_quote(quote_lines))
+            in_quote = False
+            quote_lines = []
+            continue
+        if in_quote:
+            quote_lines.append(line)
+            continue
         rendered.append(render_telegram_change_line(line))
+    if quote_lines:
+        rendered.append(render_telegram_quote(quote_lines))
     return "\n\n".join(rendered)
 
 
+def render_telegram_quote(lines):
+    rendered = []
+    for index, line in enumerate(lines):
+        if index == 0:
+            rendered.append("<b>{}</b>".format(h(line)))
+        else:
+            rendered.append(h(line))
+    return "<blockquote>{}</blockquote>".format("\n".join(rendered))
+
+
 def render_telegram_change_line(line):
+    if line in {"Полный diff", "Коротко за час"}:
+        return "<b>{}</b>".format(h(line))
+
     grid_day_match = re.match(r"^(.+?): день «(.+?)», строка «(.+?)», колонка «(.+?)» - было «(.*?)», стало «(.*?)»\.$", line)
     if grid_day_match:
         _sheet, day_name, row_name, column_name, old_value, new_value = grid_day_match.groups()
