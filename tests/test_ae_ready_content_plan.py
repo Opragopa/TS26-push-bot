@@ -99,6 +99,10 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(sessions_values[0], ae_content_plan.LEGACY_SESSION_FIELDS)
         self.assertEqual(client.created, [monitor.AE_READY_SPREADSHEET_TITLE])
 
+    def test_state_source_url_overrides_env_default(self):
+        state = {monitor.AE_READY_STATE_KEY: {"source_url": "https://docs.google.com/spreadsheets/d/custom/edit?gid=1"}}
+        self.assertEqual(monitor.ae_ready_source_url(state), "https://docs.google.com/spreadsheets/d/custom/edit?gid=1")
+
     def test_llm_corrector_falls_back_to_groq(self):
         old_values = {key: os.environ.get(key) for key in ("AI_CORRECTION_PROVIDER", "AI_CORRECTION_FALLBACK_PROVIDER", "DEEPSEEK_API_KEY", "GROQ_API_KEY")}
         os.environ["AI_CORRECTION_PROVIDER"] = "deepseek"

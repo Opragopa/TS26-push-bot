@@ -181,10 +181,14 @@ DEEPSEEK_MODEL=deepseek-v4-pro
 ```text
 /ae_sync
 /ae_status
+/ae_source
 /ae_link
 /ae_warnings
 /ae_rebuild
 ```
+
+`/ae_source` без аргументов показывает текущую ссылку источника.
+`/ae_source https://docs.google.com/spreadsheets/d/...` меняет ссылку на исходный `Контент-план` для следующих sync.
 
 ## Системные уведомления macOS
 

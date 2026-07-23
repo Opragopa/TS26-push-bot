@@ -1390,6 +1390,18 @@ def handle_admin_message(args, sheets, state, message):
         send_admin_message(args, chat_id, "TS26: Контент-доступ", content_access_report(state), reply_markup=admin_keyboard())
     elif command == "/ae_status":
         send_admin_message(args, chat_id, "TS26: AE-ready статус", ae_status_report(state), reply_markup=admin_keyboard())
+    elif command == "/ae_source":
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            send_admin_message(args, chat_id, "TS26: AE-ready источник", "Текущая ссылка:\n{}".format(ae_ready_source_url(state)), reply_markup=admin_keyboard())
+            return True
+        new_url = parts[1].strip()
+        if "docs.google.com/spreadsheets/d/" not in new_url:
+            send_admin_message(args, chat_id, "TS26: ошибка AE-ready", "Нужна ссылка на Google Sheets в формате docs.google.com/spreadsheets/d/...", reply_markup=admin_keyboard())
+            return True
+        ae_ready_state(state)["source_url"] = new_url
+        ae_ready_state(state).pop("source_hash", None)
+        send_admin_message(args, chat_id, "TS26: AE-ready источник", "Новая ссылка сохранена:\n{}\n\nТеперь можно запустить /ae_sync.".format(new_url), reply_markup=admin_keyboard())
     elif command == "/ae_link":
         spreadsheet_id = ae_ready_spreadsheet_id(state)
         send_admin_message(args, chat_id, "TS26: AE-ready ссылка", ae_ready_url(spreadsheet_id) if spreadsheet_id else "AE-ready таблица еще не создана. Запустите /ae_sync.", reply_markup=admin_keyboard())
@@ -1660,6 +1672,11 @@ def ae_ready_spreadsheet_id(state):
     return str(ae_ready_state(state).get("spreadsheet_id") or "").strip()
 
 
+def ae_ready_source_url(state):
+    saved = str(ae_ready_state(state).get("source_url") or "").strip()
+    return saved or AE_READY_SOURCE_URL
+
+
 def ae_ready_url(spreadsheet_id):
     return ae_content_plan.google_sheet_url(spreadsheet_id) if spreadsheet_id else ""
 
@@ -1669,6 +1686,7 @@ def ae_status_report(state):
     spreadsheet_id = ae_ready_spreadsheet_id(state)
     lines = [
         "AE-ready таблица: {}".format(ae_ready_url(spreadsheet_id) if spreadsheet_id else "еще не создана"),
+        "Источник: {}".format(ae_ready_source_url(state)),
         "Последний sync: {}".format(data.get("last_synced_at") or "не было"),
         "Source hash: {}".format(data.get("source_hash") or "нет"),
         "Data hash: {}".format(data.get("data_hash") or "нет"),
@@ -1737,8 +1755,9 @@ def write_ae_records_to_spreadsheet(spreadsheet, records):
 
 
 def run_ae_ready_sync(args, state, force=False, rebuild=False):
-    source_sheet = {"label": "Контент-план", "url": AE_READY_SOURCE_URL}
-    current = fetch_sheet(AE_READY_SOURCE_URL, args.timeout)
+    source_url = ae_ready_source_url(state)
+    source_sheet = {"label": "Контент-план", "url": source_url}
+    current = fetch_sheet(source_url, args.timeout)
     data = ae_ready_state(state)
     if not force and data.get("source_hash") == current["hash"]:
         return {"changed": False, "message": "AE-ready таблица уже актуальна.", "spreadsheet_id": ae_ready_spreadsheet_id(state)}
