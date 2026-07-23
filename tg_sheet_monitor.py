@@ -19,6 +19,8 @@ import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import ae_content_plan
+
 
 def env_bool(name, default=False):
     value = os.environ.get(name)
@@ -39,7 +41,7 @@ def env_int(name, default):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-23.03"
+APP_VERSION = "2026-07-23.04"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -58,9 +60,14 @@ CONTENT_PLAN_DIGEST_STATE_KEY = "_content_plan_hourly_digest"
 CONTENT_PLAN_TIME_ZONE = ZoneInfo("Europe/Moscow")
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
 TELEGRAM_QUOTE_START = "::quote"
 TELEGRAM_QUOTE_END = "::endquote"
 TELEGRAM_PARSE_MODE = "HTML"
+AE_READY_STATE_KEY = "_ae_ready_content_plan"
+AE_READY_SOURCE_URL = os.environ.get("AE_READY_SOURCE_URL", "https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400")
+AE_READY_SPREADSHEET_TITLE = os.environ.get("AE_READY_SPREADSHEET_TITLE", "TS26 AE-ready Content Plan")
+AE_READY_CONFIDENCE_THRESHOLD = float(os.environ.get("AI_CORRECTION_CONFIDENCE_THRESHOLD", "0.82"))
 DIFF_BOUNDARY_CHARS = " \t,.;:!?-–—()[]{}«»\"'"
 PLAQUE_SPREADSHEET_ID = os.environ.get("PLAQUE_SPREADSHEET_ID", "1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js")
 PLAQUE_WORKSHEET_GID = int(os.environ.get("PLAQUE_WORKSHEET_GID", "1399617264"))
@@ -678,6 +685,44 @@ def groq_chat_completion_text(payload, timeout):
     raise MonitorError("Groq не вернул текст сводки.")
 
 
+def chat_completion_text(provider_name, url, api_key, payload, timeout):
+    if not api_key:
+        raise ConfigError("Не задан ключ {}.".format(provider_name))
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer {}".format(api_key),
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise MonitorError("{} HTTP {}: {}".format(provider_name, exc.code, body[:500]))
+    except urllib.error.URLError as exc:
+        raise MonitorError("{} недоступен: {}".format(provider_name, exc.reason))
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        raise MonitorError("{} вернул не JSON: {}".format(provider_name, raw[:500]))
+    if parsed.get("error"):
+        error = parsed["error"]
+        detail = error.get("message") if isinstance(error, dict) else str(error)
+        raise MonitorError("{} ошибка: {}".format(provider_name, detail))
+    choices = parsed.get("choices") or []
+    if choices:
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    raise MonitorError("{} не вернул текст.".format(provider_name))
+
+
 def ai_summary_instructions():
     return (
         "Ты готовишь короткую сводку изменений Контент-плана для Telegram. "
@@ -736,6 +781,92 @@ def build_ai_content_plan_summary(diff, timeout):
     if not lines:
         raise MonitorError("AI-провайдер вернул пустую сводку.")
     return "\n".join(lines)
+
+
+def strip_json_code_fence(text):
+    value = str(text or "").strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value)
+    return value.strip()
+
+
+def ae_correction_instructions():
+    return (
+        "Ты корректируешь одну ячейку контент-плана для After Effects. "
+        "Верни только JSON-объект без Markdown. Не добавляй фактов, которых нет в raw_text. "
+        "Исправляй только уверенные случаи: тему, короткое описание, формат, людей и должности. "
+        "Если сомневаешься, оставь поле пустым и добавь предупреждение. "
+        "Схема: {\"topic\":\"\",\"description\":\"\",\"format\":\"\",\"people\":[{\"name\":\"\",\"role\":\"\",\"position\":\"\"}],\"warnings\":[],\"confidence\":0.0}."
+    )
+
+
+def ae_correction_payload(context):
+    return {
+        "source_cell": context.get("source_cell", ""),
+        "day": context.get("day", ""),
+        "date": context.get("date", ""),
+        "time": context.get("time", ""),
+        "venue": context.get("venue", ""),
+        "raw_text": context.get("raw_text", ""),
+        "regular_parser": context.get("parser", {}),
+    }
+
+
+def ae_correction_provider_request(provider, context, timeout):
+    provider = normalize_space(provider).casefold()
+    prompt = json.dumps(ae_correction_payload(context), ensure_ascii=False)
+    messages = [
+        {"role": "system", "content": ae_correction_instructions()},
+        {"role": "user", "content": prompt},
+    ]
+    if provider == "deepseek":
+        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro").strip() or "deepseek-v4-pro"
+        payload = {"model": model, "messages": messages, "temperature": 0.1, "max_tokens": 900, "response_format": {"type": "json_object"}}
+        text = chat_completion_text("DeepSeek", DEEPSEEK_CHAT_COMPLETIONS_URL, os.environ.get("DEEPSEEK_API_KEY", "").strip(), payload, timeout)
+    elif provider == "groq":
+        model = os.environ.get("GROQ_CORRECTION_MODEL", os.environ.get("GROQ_SUMMARY_MODEL", "llama-3.3-70b-versatile")).strip() or "llama-3.3-70b-versatile"
+        payload = {"model": model, "messages": messages, "temperature": 0.1, "max_tokens": 900, "response_format": {"type": "json_object"}}
+        text = chat_completion_text("Groq", GROQ_CHAT_COMPLETIONS_URL, os.environ.get("GROQ_API_KEY", "").strip(), payload, timeout)
+    else:
+        raise ConfigError("Неизвестный AI_CORRECTION_PROVIDER='{}'.".format(provider))
+    try:
+        parsed = json.loads(strip_json_code_fence(text))
+    except ValueError as exc:
+        raise MonitorError("{} вернул невалидный JSON коррекции: {}".format(provider, exc))
+    if not isinstance(parsed, dict):
+        raise MonitorError("{} вернул JSON не объект.".format(provider))
+    return parsed
+
+
+def build_ae_llm_corrector(args):
+    provider = normalize_space(os.environ.get("AI_CORRECTION_PROVIDER", "deepseek")).casefold() or "deepseek"
+    fallback = normalize_space(os.environ.get("AI_CORRECTION_FALLBACK_PROVIDER", "groq")).casefold()
+    max_calls = max(0, env_int("AI_CORRECTION_MAX_CALLS_PER_SYNC", 16))
+    enabled = env_bool("AI_CORRECTION_ENABLED", True) and max_calls > 0
+    has_primary = (provider == "deepseek" and os.environ.get("DEEPSEEK_API_KEY", "").strip()) or (provider == "groq" and os.environ.get("GROQ_API_KEY", "").strip())
+    has_fallback = (fallback == "deepseek" and os.environ.get("DEEPSEEK_API_KEY", "").strip()) or (fallback == "groq" and os.environ.get("GROQ_API_KEY", "").strip())
+    if not enabled or not (has_primary or has_fallback):
+        return None
+    usage = {"count": 0}
+
+    def correct(context):
+        if usage["count"] >= max_calls:
+            return {"warnings": ["Лимит LLM-коррекций за sync исчерпан."], "confidence": 0}
+        usage["count"] += 1
+        providers = [provider]
+        if fallback and fallback != provider:
+            providers.append(fallback)
+        last_error = None
+        for item in providers:
+            try:
+                return ae_correction_provider_request(item, context, args.timeout)
+            except (MonitorError, ConfigError) as exc:
+                last_error = exc
+                log("AE LLM-коррекция через {} не получена: {}".format(item, exc))
+        return {"warnings": ["LLM-коррекция недоступна: {}".format(last_error)], "confidence": 0}
+
+    return correct
 
 
 def flush_content_plan_digest(args, sheets, state, moment=None):
@@ -951,6 +1082,10 @@ def admin_keyboard():
             ],
             [
                 {"text": "Контент-доступ", "callback_data": "dbg:content_access"},
+            ],
+            [
+                {"text": "AE sync", "callback_data": "dbg:ae_sync"},
+                {"text": "AE status", "callback_data": "dbg:ae_status"},
             ],
             [
                 {"text": "Тест Контент-план", "callback_data": "dbg:test:Контент-план"},
@@ -1189,6 +1324,14 @@ def handle_admin_callback(args, sheets, state, callback):
         send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets, state=state), reply_markup=admin_keyboard())
     elif data == "dbg:content_access":
         send_admin_message(args, chat_id, "TS26: Контент-доступ", content_access_report(state), reply_markup=admin_keyboard())
+    elif data == "dbg:ae_status":
+        send_admin_message(args, chat_id, "TS26: AE-ready статус", ae_status_report(state), reply_markup=admin_keyboard())
+    elif data == "dbg:ae_sync":
+        try:
+            result = run_ae_ready_sync(args, state, force=True, rebuild=False)
+            send_admin_message(args, chat_id, "TS26: AE-ready sync", "{}\n{}".format(result["message"], ae_ready_url(result.get("spreadsheet_id"))), reply_markup=admin_keyboard())
+        except (MonitorError, ConfigError, ae_content_plan.AEContentPlanError) as exc:
+            send_admin_message(args, chat_id, "TS26: ошибка AE-ready", str(exc), reply_markup=admin_keyboard())
     elif data == "dbg:test:startup":
         send_startup_message(args, sheets, state=state)
         send_admin_message(args, chat_id, "TS26: тест старта", "Стартовое сообщение отправлено основным получателям.", reply_markup=admin_keyboard())
@@ -1245,6 +1388,19 @@ def handle_admin_message(args, sheets, state, message):
         send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets, state=state), reply_markup=admin_keyboard())
     elif command == "/content_users":
         send_admin_message(args, chat_id, "TS26: Контент-доступ", content_access_report(state), reply_markup=admin_keyboard())
+    elif command == "/ae_status":
+        send_admin_message(args, chat_id, "TS26: AE-ready статус", ae_status_report(state), reply_markup=admin_keyboard())
+    elif command == "/ae_link":
+        spreadsheet_id = ae_ready_spreadsheet_id(state)
+        send_admin_message(args, chat_id, "TS26: AE-ready ссылка", ae_ready_url(spreadsheet_id) if spreadsheet_id else "AE-ready таблица еще не создана. Запустите /ae_sync.", reply_markup=admin_keyboard())
+    elif command == "/ae_warnings":
+        send_admin_message(args, chat_id, "TS26: AE-ready warnings", ae_warnings_report(state), reply_markup=admin_keyboard())
+    elif command in {"/ae_sync", "/ae_rebuild"}:
+        try:
+            result = run_ae_ready_sync(args, state, force=True, rebuild=command == "/ae_rebuild")
+            send_admin_message(args, chat_id, "TS26: AE-ready sync", "{}\n{}".format(result["message"], ae_ready_url(result.get("spreadsheet_id"))), reply_markup=admin_keyboard())
+        except (MonitorError, ConfigError, ae_content_plan.AEContentPlanError) as exc:
+            send_admin_message(args, chat_id, "TS26: ошибка AE-ready", str(exc), reply_markup=admin_keyboard())
     elif command in {"/add_content_user", "/remove_content_user"}:
         parts = text.split()
         if len(parts) < 2:
@@ -1441,7 +1597,7 @@ def get_google_client():
         from google.oauth2.service_account import Credentials
     except ImportError as exc:
         raise ConfigError("Не установлены зависимости для Google Sheets. Проверьте requirements.txt на хостинге: {}".format(exc))
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.file"]
     if oauth_user_json:
         try:
             info = json.loads(oauth_user_json)
@@ -1488,6 +1644,153 @@ def run_google_action(label, action):
         raise
     except Exception as exc:
         raise ConfigError("{}: {}".format(label, describe_google_error(exc)))
+
+
+def ae_ready_state(state):
+    data = state.setdefault(AE_READY_STATE_KEY, {})
+    if not isinstance(data, dict):
+        state[AE_READY_STATE_KEY] = {}
+    return state[AE_READY_STATE_KEY]
+
+
+def ae_ready_spreadsheet_id(state):
+    explicit = os.environ.get("AE_READY_SPREADSHEET_ID", "").strip()
+    if explicit:
+        return explicit
+    return str(ae_ready_state(state).get("spreadsheet_id") or "").strip()
+
+
+def ae_ready_url(spreadsheet_id):
+    return ae_content_plan.google_sheet_url(spreadsheet_id) if spreadsheet_id else ""
+
+
+def ae_status_report(state):
+    data = ae_ready_state(state)
+    spreadsheet_id = ae_ready_spreadsheet_id(state)
+    lines = [
+        "AE-ready таблица: {}".format(ae_ready_url(spreadsheet_id) if spreadsheet_id else "еще не создана"),
+        "Последний sync: {}".format(data.get("last_synced_at") or "не было"),
+        "Source hash: {}".format(data.get("source_hash") or "нет"),
+        "Data hash: {}".format(data.get("data_hash") or "нет"),
+        "Сессии: {}".format(data.get("sessions") or 0),
+        "Люди: {}".format(data.get("unique_people") or 0),
+        "Плашки: {}".format(data.get("badges") or 0),
+        "Визитки: {}".format(data.get("cards") or 0),
+        "Warnings: {}".format(data.get("warnings_count") or 0),
+    ]
+    return "\n".join(lines)
+
+
+def ae_warnings_report(state, limit=12):
+    warnings = ae_ready_state(state).get("warnings") or []
+    if not warnings:
+        return "Warnings нет."
+    lines = []
+    for index, item in enumerate(warnings[:limit], start=1):
+        source = item.get("source_cell") or "общий отчет"
+        lines.append("{}. {}: {}".format(index, source, item.get("message", "")))
+    if len(warnings) > limit:
+        lines.append("Еще warnings: {}".format(len(warnings) - limit))
+    return "\n".join(lines)
+
+
+def get_or_create_ae_spreadsheet(client, state, rebuild=False):
+    spreadsheet_id = "" if rebuild else ae_ready_spreadsheet_id(state)
+    if spreadsheet_id:
+        return run_google_action("Не удалось открыть AE-ready таблицу", lambda: client.open_by_key(spreadsheet_id))
+    spreadsheet = run_google_action("Не удалось создать AE-ready таблицу", lambda: client.create(AE_READY_SPREADSHEET_TITLE))
+    spreadsheet_id = getattr(spreadsheet, "id", "") or getattr(spreadsheet, "spreadsheet_id", "")
+    if not spreadsheet_id:
+        raise ConfigError("Google создал таблицу, но не вернул spreadsheet_id.")
+    ae_ready_state(state)["spreadsheet_id"] = spreadsheet_id
+    share_emails = [item.strip() for item in re.split(r"[,;\s]+", os.environ.get("AE_READY_SHARE_EMAILS", "")) if item.strip()]
+    for email in share_emails:
+        try:
+            spreadsheet.share(email, perm_type="user", role="writer")
+        except Exception as exc:
+            log("Не удалось расшарить AE-ready таблицу на {}: {}".format(email, exc))
+    return spreadsheet
+
+
+def ensure_worksheet(spreadsheet, title, rows=100, cols=20):
+    for worksheet in spreadsheet.worksheets():
+        if worksheet.title == title:
+            return worksheet
+    return spreadsheet.add_worksheet(title=title, rows=max(1, rows), cols=max(1, cols))
+
+
+def table_values(fieldnames, rows):
+    values = [list(fieldnames)]
+    for row in rows:
+        values.append([str(row.get(field, "")) for field in fieldnames])
+    return values
+
+
+def write_ae_records_to_spreadsheet(spreadsheet, records):
+    for title, fields, key in ae_content_plan.SHEET_TABS:
+        rows = records.get(key) or []
+        worksheet = run_google_action("Не удалось подготовить лист {}".format(title), lambda title=title, rows=rows, fields=fields: ensure_worksheet(spreadsheet, title, rows=len(rows) + 10, cols=len(fields) + 2))
+        values = table_values(fields, rows)
+        run_google_action("Не удалось очистить лист {}".format(title), worksheet.clear)
+        if values:
+            run_google_action("Не удалось записать лист {}".format(title), lambda worksheet=worksheet, values=values: worksheet.update(values, value_input_option="USER_ENTERED"))
+
+
+def run_ae_ready_sync(args, state, force=False, rebuild=False):
+    source_sheet = {"label": "Контент-план", "url": AE_READY_SOURCE_URL}
+    current = fetch_sheet(AE_READY_SOURCE_URL, args.timeout)
+    data = ae_ready_state(state)
+    if not force and data.get("source_hash") == current["hash"]:
+        return {"changed": False, "message": "AE-ready таблица уже актуальна.", "spreadsheet_id": ae_ready_spreadsheet_id(state)}
+    corrector = build_ae_llm_corrector(args)
+    records = ae_content_plan.build_records(current["cells"], corrector=corrector, confidence_threshold=AE_READY_CONFIDENCE_THRESHOLD)
+    data_hash = ae_content_plan.records_hash(records)
+    client = get_google_client()
+    spreadsheet = get_or_create_ae_spreadsheet(client, state, rebuild=rebuild)
+    write_ae_records_to_spreadsheet(spreadsheet, records)
+    spreadsheet_id = getattr(spreadsheet, "id", "") or ae_ready_spreadsheet_id(state)
+    report = records.get("report") or {}
+    data.update({
+        "spreadsheet_id": spreadsheet_id,
+        "source_url": source_sheet["url"],
+        "source_hash": current["hash"],
+        "data_hash": data_hash,
+        "last_synced_at": now_text(),
+        "sessions": report.get("sessions_found", 0),
+        "unique_people": report.get("unique_people", 0),
+        "badges": report.get("badges", 0),
+        "cards": report.get("cards", 0),
+        "warnings_count": len(records.get("warnings") or []),
+        "warnings": records.get("warnings") or [],
+    })
+    return {
+        "changed": True,
+        "spreadsheet_id": spreadsheet_id,
+        "message": "AE-ready обновлена: сессий {}, людей {}, плашек {}, визиток {}, warnings {}.".format(
+            data["sessions"], data["unique_people"], data["badges"], data["cards"], data["warnings_count"]
+        ),
+    }
+
+
+def maybe_hourly_ae_ready_sync(args, sheets, state, moment=None):
+    if env_bool("AE_READY_SYNC_ENABLED", True) is False:
+        return False
+    current_hour = content_plan_hour_key(moment)
+    data = ae_ready_state(state)
+    if data.get("last_auto_sync_hour") == current_hour:
+        return False
+    try:
+        result = run_ae_ready_sync(args, state, force=False, rebuild=False)
+        data["last_auto_sync_hour"] = current_hour
+        if result.get("changed"):
+            for admin_id in admin_chat_ids():
+                send_plain_chat_message(args, admin_id, "TS26: AE-ready обновлена", "{}\n{}".format(result["message"], ae_ready_url(result.get("spreadsheet_id"))))
+        return True
+    except (MonitorError, ConfigError, ae_content_plan.AEContentPlanError) as exc:
+        data["last_auto_sync_hour"] = current_hour
+        data["last_error"] = str(exc)
+        log("AE-ready hourly sync не выполнен: {}".format(exc))
+        return True
 
 
 def get_plaque_worksheet():
@@ -2127,6 +2430,8 @@ def main(argv=None):
     while True:
         if flush_content_plan_digest(args, sheets, state):
             save_state(state_path, state)
+        if maybe_hourly_ae_ready_sync(args, sheets, state):
+            save_state(state_path, state)
         if check_all(sheets, state, args):
             save_state(state_path, state)
         if args.once:
@@ -2140,6 +2445,8 @@ def main(argv=None):
             if remaining <= 0:
                 break
             if flush_content_plan_digest(args, sheets, state):
+                save_state(state_path, state)
+            if maybe_hourly_ae_ready_sync(args, sheets, state):
                 save_state(state_path, state)
             if poll_admin_updates(args, sheets, state):
                 save_state(state_path, state)

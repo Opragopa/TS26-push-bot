@@ -139,6 +139,53 @@ OPENAI_SUMMARY_MAX_INPUT_CHARS=60000
 
 Для Groq используется OpenAI-compatible endpoint `https://api.groq.com/openai/v1/chat/completions`; для OpenAI используется `gpt-5-mini` через [Responses API](https://developers.openai.com/api/docs/models). Если ключ отсутствует или AI API временно недоступен, бот не теряет уведомление: отправляет полный diff без AI-сводки и пишет причину в лог. Длинный diff автоматически делится на несколько Telegram-сообщений.
 
+## AE-ready Контент-план
+
+Бот может создавать отдельную личную Google Sheet для After Effects, не изменяя оригинальный `Контент-план`. Эта таблица обновляется раз в час, если изменился hash источника, или вручную командой `/ae_sync`.
+
+В AE-ready таблицу пишутся листы:
+
+```text
+content_plan_sessions
+content_plan_plates
+content_plan_cards
+content_plan_all_people
+content_plan_topics_model
+content_plan_sessions_model
+content_plan_session_people
+import_report
+warnings
+source_cells
+```
+
+Основные листы сохраняют формат, который уже читают скрипты из `sheet2comp-ae`: `content_plan_sessions` для тем сессий, `content_plan_plates` для плашек, `content_plan_cards` для визиток.
+
+Переменные Bothost:
+
+```text
+AE_READY_SYNC_ENABLED=true
+AE_READY_SOURCE_URL=https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400
+AE_READY_SPREADSHEET_TITLE=TS26 AE-ready Content Plan
+AI_CORRECTION_PROVIDER=deepseek
+AI_CORRECTION_FALLBACK_PROVIDER=groq
+DEEPSEEK_API_KEY=ваш_ключ_DeepSeek
+DEEPSEEK_MODEL=deepseek-v4-pro
+```
+
+`AE_READY_SPREADSHEET_ID` можно не задавать: при первом `/ae_sync` бот создаст новую таблицу и сохранит id в `sheet_state.json`. Если таблицу нужно расшарить на ваш Google-аккаунт, задайте `AE_READY_SHARE_EMAILS=email@example.com`.
+
+Для авто-создания таблицы Google-авторизация использует scope `drive.file`. Если OAuth-токен был создан раньше только для `spreadsheets`, пересоздайте `GOOGLE_OAUTH_USER_JSON`.
+
+Команды админа:
+
+```text
+/ae_sync
+/ae_status
+/ae_link
+/ae_warnings
+/ae_rebuild
+```
+
 ## Системные уведомления macOS
 
 На Mac уведомления включены по умолчанию. Они используют те же человеческие тексты, что и Telegram: кто/что изменилось, старая и новая версия, название таблицы в подзаголовке.
@@ -243,6 +290,8 @@ python3 tg_sheet_monitor.py --once --no-telegram
 - `Тест План записи` - отправить тестовое уведомление всем получателям `План записи`.
 - `Тест старта` - отправить стартовое сообщение основным получателям.
 - `Google-доступ` - проверить, видит ли бот переменные Google-авторизации и может ли открыть лист `Моушен`.
+- `AE sync` - вручную обновить отдельную AE-ready таблицу.
+- `AE status` - показать статус, hash и ссылку на AE-ready таблицу.
 - `Превью формы` - показать админу, как обычный пользователь видит форму добавления плашки, без записи в Google Sheet.
 - `Режим пользователя` - временно переключить ваш админский чат в полноценный режим обычного пользователя формы. В этом режиме можно реально отправить тестовую плашку в Google Sheet после подтверждения.
 - `Контент-доступ` - показать команды для добавления и удаления получателей `Контент-план`.
