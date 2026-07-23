@@ -118,6 +118,57 @@ class HourlyContentPlanTests(unittest.TestCase):
         self.assertEqual(queued, [True])
         self.assertEqual(notified, [True])
 
+    def test_parse_plaque_batch_accepts_multiple_rows(self):
+        entries = monitor.parse_plaque_batch("Иванов Иван_Должность 1\nДмитриев Дмитрий _ Должность 2")
+        self.assertEqual(
+            entries,
+            [
+                {"name": "Иванов Иван", "position": "Должность 1"},
+                {"name": "Дмитриев Дмитрий", "position": "Должность 2"},
+            ],
+        )
+
+    def test_parse_plaque_batch_rejects_multiline_without_separator(self):
+        with self.assertRaises(monitor.ConfigError):
+            monitor.parse_plaque_batch("Иванов Иван_Должность 1\nДмитриев Дмитрий Должность 2")
+
+    def test_confirm_batch_hides_sheet_links_from_user(self):
+        state = {
+            "_plaque_sessions": {
+                "555": {
+                    "entries": [
+                        {"name": "Иванов Иван", "position": "Должность 1"},
+                        {"name": "Дмитриев Дмитрий", "position": "Должность 2"},
+                    ]
+                }
+            }
+        }
+        fake_results = [
+            {"action": "created", "worksheet_title": "Моушен", "worksheet_gid": 1399617264, "row": 280, "url": "https://docs.google.com/row280"},
+            {"action": "updated", "worksheet_title": "Моушен", "worksheet_gid": 1399617264, "row": 281, "url": "https://docs.google.com/row281"},
+        ]
+        sent = []
+
+        def fake_send(_args, chat_id, title, message, reply_markup=None):
+            sent.append((str(chat_id), title, message, reply_markup))
+
+        old_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        os.environ["TELEGRAM_CHAT_ID"] = "999"
+        try:
+            with mock.patch.object(monitor, "write_plaque_to_sheet", side_effect=fake_results), mock.patch.object(monitor, "send_plain_chat_message", side_effect=fake_send):
+                monitor.confirm_plaque(self.args, state, "555")
+        finally:
+            if old_chat_id is None:
+                os.environ.pop("TELEGRAM_CHAT_ID", None)
+            else:
+                os.environ["TELEGRAM_CHAT_ID"] = old_chat_id
+
+        user_message = next(item for item in sent if item[0] == "555")[2]
+        admin_message = next(item for item in sent if item[0] == "999")[2]
+        self.assertNotIn("https://docs.google.com", user_message)
+        self.assertIn("https://docs.google.com/row280", admin_message)
+        self.assertEqual(state["_plaque_sessions"], {})
+
 
 if __name__ == "__main__":
     unittest.main()

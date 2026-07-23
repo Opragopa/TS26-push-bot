@@ -39,7 +39,7 @@ def env_int(name, default):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-22.18"
+APP_VERSION = "2026-07-23.01"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -871,17 +871,28 @@ def admin_keyboard():
     }
 
 
+PLAQUE_ADD_BUTTON_TEXT = "Добавить новую плашку"
+
+
 def plaque_keyboard():
-    rows = [[{"text": "Добавить новую плашку", "callback_data": "plq:start"}]]
+    rows = [[{"text": PLAQUE_ADD_BUTTON_TEXT, "callback_data": "plq:start"}]]
     return {"inline_keyboard": rows}
 
 
 def plaque_user_mode_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "Добавить новую плашку", "callback_data": "plq:start"}],
+            [{"text": PLAQUE_ADD_BUTTON_TEXT, "callback_data": "plq:start"}],
             [{"text": "Вернуться в админку", "callback_data": "plq:admin_panel"}],
         ]
+    }
+
+
+def plaque_reply_keyboard():
+    return {
+        "keyboard": [[{"text": PLAQUE_ADD_BUTTON_TEXT}]],
+        "resize_keyboard": True,
+        "is_persistent": True,
     }
 
 
@@ -1015,8 +1026,7 @@ def start_screen_text(is_content_recipient=False):
 
 
 def send_start_screen(args, chat_id, state=None, is_content_recipient=False):
-    keyboard = plaque_user_mode_keyboard() if state is not None and is_user_mode_chat(state, chat_id) else plaque_keyboard()
-    send_plain_chat_message(args, chat_id, "TS26: старт", start_screen_text(is_content_recipient=is_content_recipient), reply_markup=keyboard)
+    send_plain_chat_message(args, chat_id, "TS26: старт", start_screen_text(is_content_recipient=is_content_recipient), reply_markup=plaque_reply_keyboard())
 
 
 def send_plaque_preview(args, chat_id):
@@ -1247,15 +1257,49 @@ def validate_position(value):
     return text
 
 
+def parse_plaque_batch(value):
+    lines = [line.strip() for line in value.strip().splitlines() if line.strip()]
+    if not lines:
+        raise ConfigError("Отправьте хотя бы одну строку.")
+    if not all("_" in line for line in lines):
+        if len(lines) > 1:
+            raise ConfigError("Для пакетного добавления в каждой строке нужен формат «Фамилия Имя_Должность».")
+        return []
+    entries = []
+    for index, line in enumerate(lines, start=1):
+        name_part, position_part = line.split("_", 1)
+        try:
+            name = validate_person_name(name_part)
+            position = validate_position(position_part)
+        except ConfigError as exc:
+            raise ConfigError("Строка {}: {}".format(index, exc))
+        entries.append({"name": name, "position": position})
+    if len(entries) > 50:
+        raise ConfigError("За один раз можно отправить до 50 плашек.")
+    return entries
+
+
 def send_plaque_start(args, chat_id, state=None):
-    message = "Бот попросит «Фамилия Имя» и «Должность», затем покажет подтверждение перед записью в таблицу."
-    keyboard = plaque_user_mode_keyboard() if state is not None and is_user_mode_chat(state, chat_id) else plaque_keyboard()
-    send_plain_chat_message(args, chat_id, "TS26: плашка", message, reply_markup=keyboard)
+    message = (
+        "Можно добавить одну плашку пошагово или сразу несколько строк.\n\n"
+        "Для одной плашки отправьте имя:\n"
+        "Иванов Иван\n\n"
+        "Для пакетного добавления отправьте строки в формате:\n"
+        "Иванов Иван_Должность 1\n"
+        "Дмитриев Дмитрий_Должность 2"
+    )
+    send_plain_chat_message(args, chat_id, "TS26: плашка", message, reply_markup=plaque_reply_keyboard())
 
 
 def ask_plaque_name(args, state, chat_id):
     plaque_session(state, chat_id).update({"step": "name"})
-    send_plain_chat_message(args, chat_id, "TS26: новая плашка", "Введите имя в формате:\nФамилия Имя")
+    send_plain_chat_message(
+        args,
+        chat_id,
+        "TS26: новая плашка",
+        "Введите имя в формате:\nФамилия Имя\n\nИли отправьте несколько строк:\nФамилия Имя_Должность",
+        reply_markup=plaque_reply_keyboard(),
+    )
 
 
 def ask_plaque_position(args, state, chat_id):
@@ -1265,6 +1309,17 @@ def ask_plaque_position(args, state, chat_id):
 
 def send_plaque_confirmation(args, state, chat_id):
     session = plaque_session(state, chat_id)
+    entries = session.get("entries")
+    if isinstance(entries, list) and entries:
+        lines = ["Проверьте перед отправкой:", ""]
+        for index, entry in enumerate(entries, start=1):
+            lines.append("{}. {} — {}".format(index, entry["name"], entry["position"]))
+        lines.extend(["", "После подтверждения бот добавит или обновит эти строки в листе «Моушен»."])
+        message = "\n".join(lines)
+        session["step"] = "confirm"
+        keyboard = plaque_confirm_user_mode_keyboard() if is_user_mode_chat(state, chat_id) else plaque_confirm_keyboard()
+        send_plain_chat_message(args, chat_id, "TS26: проверьте плашки", message, reply_markup=keyboard)
+        return
     name = session.get("name", "")
     position = session.get("position", "")
     message = "Проверьте перед отправкой:\n\nФИО: {}\nДолжность: {}\n\nПосле подтверждения бот добавит или обновит строку в листе «Моушен».".format(name, position)
@@ -1440,6 +1495,52 @@ def write_plaque_to_sheet(name, position):
 
 def confirm_plaque(args, state, chat_id):
     session = plaque_session(state, chat_id)
+    entries = session.get("entries")
+    if isinstance(entries, list) and entries:
+        results = []
+        for entry in entries:
+            result = write_plaque_to_sheet(entry["name"], entry["position"])
+            results.append({"entry": entry, "result": result})
+        clear_plaque_session(state, chat_id)
+        created_count = sum(1 for item in results if item["result"]["action"] == "created")
+        updated_count = sum(1 for item in results if item["result"]["action"] == "updated")
+        public_lines = [
+            "Плашки отправлены в таблицу.",
+            "Добавлено: {}. Обновлено: {}.".format(created_count, updated_count),
+            "",
+        ]
+        for index, item in enumerate(results, start=1):
+            action_text = "обновлена" if item["result"]["action"] == "updated" else "добавлена"
+            entry = item["entry"]
+            public_lines.append("{}. {}: {} — {}".format(index, action_text.capitalize(), entry["name"], entry["position"]))
+        admin_lines = [
+            "Пакетная отправка плашек.",
+            "Добавлено: {}. Обновлено: {}.".format(created_count, updated_count),
+            "",
+        ]
+        for index, item in enumerate(results, start=1):
+            action_text = "обновлена" if item["result"]["action"] == "updated" else "добавлена"
+            entry = item["entry"]
+            result = item["result"]
+            admin_lines.append(
+                "{}. Плашка {}.\nЛист: {} (gid={})\nСтрока: {}\nФИО: {}\nДолжность: {}\n{}".format(
+                    index,
+                    action_text,
+                    result["worksheet_title"],
+                    result["worksheet_gid"],
+                    result["row"],
+                    entry["name"],
+                    entry["position"],
+                    result["url"],
+                )
+            )
+        send_plain_chat_message(args, chat_id, "TS26: готово", "\n".join(public_lines), reply_markup=plaque_reply_keyboard())
+        for admin_id in admin_chat_ids():
+            try:
+                send_plain_chat_message(args, admin_id, "TS26: плашки через бот", "\n\n".join(admin_lines))
+            except (MonitorError, ConfigError) as exc:
+                log("Не удалось уведомить админа о пакетных плашках: {}".format(exc))
+        return
     name = session.get("name")
     position = session.get("position")
     if not name or not position:
@@ -1458,7 +1559,7 @@ def confirm_plaque(args, state, chat_id):
         position,
         result["url"],
     )
-    send_plain_chat_message(args, chat_id, "TS26: готово", public_message)
+    send_plain_chat_message(args, chat_id, "TS26: готово", public_message, reply_markup=plaque_reply_keyboard())
     for admin_id in admin_chat_ids():
         try:
             send_plain_chat_message(args, admin_id, "TS26: плашка через бота", admin_message)
@@ -1495,13 +1596,18 @@ def handle_plaque_callback(args, sheets, state, callback):
             keyboard = plaque_confirm_user_mode_keyboard() if is_user_mode_chat(state, chat_id) else plaque_confirm_keyboard()
             send_plain_chat_message(args, chat_id, "TS26: ошибка записи", str(exc), reply_markup=keyboard)
     elif data == "plq:edit_name":
+        plaque_session(state, chat_id).clear()
         ask_plaque_name(args, state, chat_id)
     elif data == "plq:edit_position":
-        ask_plaque_position(args, state, chat_id)
+        session = plaque_session(state, chat_id)
+        if isinstance(session.get("entries"), list):
+            session.clear()
+            ask_plaque_name(args, state, chat_id)
+        else:
+            ask_plaque_position(args, state, chat_id)
     elif data == "plq:cancel":
         clear_plaque_session(state, chat_id)
-        keyboard = plaque_user_mode_keyboard() if is_user_mode_chat(state, chat_id) else plaque_keyboard()
-        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=keyboard)
+        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=plaque_reply_keyboard())
     return True
 
 
@@ -1510,7 +1616,8 @@ def handle_plaque_message(args, sheets, state, message):
         return False
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
-    text = normalize_space(message.get("text") or "")
+    raw_text = (message.get("text") or "").strip()
+    text = normalize_space(raw_text)
     if not chat_id or not text:
         return False
     if not can_use_plaque_form(sheets, state, chat_id):
@@ -1521,18 +1628,24 @@ def handle_plaque_message(args, sheets, state, message):
         clear_plaque_session(state, chat_id)
         send_start_screen(args, chat_id, state=state, is_content_recipient=str(chat_id) in content_plan_chat_ids(state))
         return True
-    if command in {"/add", "/plaque"}:
+    if command in {"/add", "/plaque"} or text.casefold() == PLAQUE_ADD_BUTTON_TEXT.casefold():
         clear_plaque_session(state, chat_id)
         send_plaque_start(args, chat_id, state=state)
+        ask_plaque_name(args, state, chat_id)
         return True
     if command == "/cancel":
         clear_plaque_session(state, chat_id)
-        keyboard = plaque_user_mode_keyboard() if is_user_mode_chat(state, chat_id) else plaque_keyboard()
-        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=keyboard)
+        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=plaque_reply_keyboard())
         return True
     step = session.get("step")
     if step == "name":
         try:
+            entries = parse_plaque_batch(raw_text)
+            if entries:
+                session.clear()
+                session["entries"] = entries
+                send_plaque_confirmation(args, state, chat_id)
+                return True
             session["name"] = validate_person_name(text)
         except ConfigError as exc:
             send_plain_chat_message(args, chat_id, "TS26: проверьте имя", str(exc))
