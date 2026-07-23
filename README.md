@@ -106,20 +106,38 @@
 
 В начале пакета будет короткая сводка из 3-5 строк, затем полный diff. `План записи` не меняется: он по-прежнему отправляет diff сразу после обнаружения изменения.
 
-Для AI-сводки задайте на Bothost защищённую переменную:
+Для AI-сводки через Groq задайте на Bothost защищённую переменную:
+
+```text
+GROQ_API_KEY=ваш_ключ_Groq_API
+```
+
+По умолчанию бот сам выберет Groq, если есть `GROQ_API_KEY`, и будет использовать модель:
+
+```text
+GROQ_SUMMARY_MODEL=llama-3.3-70b-versatile
+```
+
+Можно явно зафиксировать провайдера:
+
+```text
+AI_SUMMARY_PROVIDER=groq
+```
+
+Альтернативно можно использовать OpenAI:
 
 ```text
 OPENAI_API_KEY=ваш_ключ_OpenAI_API
+OPENAI_SUMMARY_MODEL=gpt-5-mini
 ```
 
-Дополнительно можно изменить модель и ограничить размер diff, передаваемого в API:
+Дополнительно можно ограничить размер diff, передаваемого в AI API:
 
 ```text
-OPENAI_SUMMARY_MODEL=gpt-5-mini
 OPENAI_SUMMARY_MAX_INPUT_CHARS=60000
 ```
 
-По умолчанию используется `gpt-5-mini` через [Responses API](https://developers.openai.com/api/docs/models). Если ключ отсутствует или OpenAI временно недоступен, бот не теряет уведомление: отправляет полный diff без AI-сводки и пишет причину в лог. Длинный diff автоматически делится на несколько Telegram-сообщений.
+Для Groq используется OpenAI-compatible endpoint `https://api.groq.com/openai/v1/chat/completions`; для OpenAI используется `gpt-5-mini` через [Responses API](https://developers.openai.com/api/docs/models). Если ключ отсутствует или AI API временно недоступен, бот не теряет уведомление: отправляет полный diff без AI-сводки и пишет причину в лог. Длинный diff автоматически делится на несколько Telegram-сообщений.
 
 ## Системные уведомления macOS
 
@@ -182,8 +200,9 @@ python3 tg_sheet_monitor.py --once --no-telegram
    GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
    # или GOOGLE_OAUTH_USER_JSON={"type":"authorized_user",...}
    PLAQUE_FORM_ENABLED=true
-   OPENAI_API_KEY=ваш_ключ_OpenAI_API
-   OPENAI_SUMMARY_MODEL=gpt-5-mini
+   GROQ_API_KEY=ваш_ключ_Groq_API
+   AI_SUMMARY_PROVIDER=groq
+   GROQ_SUMMARY_MODEL=llama-3.3-70b-versatile
    SHEET_MONITOR_INTERVAL=120
    SHEET_MONITOR_DURATION_SECONDS=0
    SHEET_MONITOR_DATA_DIR=data

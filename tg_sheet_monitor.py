@@ -39,7 +39,7 @@ def env_int(name, default):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-23.01"
+APP_VERSION = "2026-07-23.02"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -57,6 +57,7 @@ MAX_TELEGRAM_MESSAGE_CHARS = 3800
 CONTENT_PLAN_DIGEST_STATE_KEY = "_content_plan_hourly_digest"
 CONTENT_PLAN_TIME_ZONE = ZoneInfo("Europe/Moscow")
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 TELEGRAM_PARSE_MODE = "HTML"
 DIFF_BOUNDARY_CHARS = " \t,.;:!?-–—()[]{}«»\"'"
 PLAQUE_SPREADSHEET_ID = os.environ.get("PLAQUE_SPREADSHEET_ID", "1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js")
@@ -636,25 +637,92 @@ def openai_response_text(payload, timeout):
     raise MonitorError("OpenAI не вернул текст сводки.")
 
 
+def groq_chat_completion_text(payload, timeout):
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not key:
+        raise ConfigError("Не задан GROQ_API_KEY: отправляю diff без AI-сводки.")
+    request = urllib.request.Request(
+        GROQ_CHAT_COMPLETIONS_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer {}".format(key),
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise MonitorError("Groq HTTP {}: {}".format(exc.code, body[:500]))
+    except urllib.error.URLError as exc:
+        raise MonitorError("Groq недоступен: {}".format(exc.reason))
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        raise MonitorError("Groq вернул не JSON: {}".format(raw[:500]))
+    if parsed.get("error"):
+        error = parsed["error"]
+        detail = error.get("message") if isinstance(error, dict) else str(error)
+        raise MonitorError("Groq ошибка: {}".format(detail))
+    choices = parsed.get("choices") or []
+    if choices:
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    raise MonitorError("Groq не вернул текст сводки.")
+
+
+def ai_summary_instructions():
+    return (
+        "Ты готовишь короткую сводку изменений Контент-плана для Telegram. "
+        "Верни только 3-5 коротких строк на русском. Каждая строка должна описывать "
+        "заметный факт из diff. Не добавляй факты, имена, даты или ссылки, которых нет "
+        "в diff. Не используй Markdown, HTML, заголовки и вступления."
+    )
+
+
+def ai_summary_response_text(source_diff, timeout):
+    provider = normalize_space(os.environ.get("AI_SUMMARY_PROVIDER", "")).casefold()
+    has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
+    has_openai = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+    if not provider:
+        provider = "groq" if has_groq else "openai"
+    instructions = ai_summary_instructions()
+    if provider == "groq":
+        model = os.environ.get("GROQ_SUMMARY_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": source_diff},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 350,
+        }
+        return groq_chat_completion_text(payload, timeout)
+    if provider == "openai":
+        model = os.environ.get("OPENAI_SUMMARY_MODEL", "gpt-5-mini").strip() or "gpt-5-mini"
+        payload = {
+            "model": model,
+            "instructions": instructions,
+            "input": source_diff,
+            "max_output_tokens": 350,
+        }
+        return openai_response_text(payload, timeout)
+    raise ConfigError("Неизвестный AI_SUMMARY_PROVIDER='{}'. Используйте groq или openai.".format(provider))
+
+
 def build_ai_content_plan_summary(diff, timeout):
     max_chars = max(1000, env_int("OPENAI_SUMMARY_MAX_INPUT_CHARS", 60000))
     source_diff = str(diff or "")
     if len(source_diff) > max_chars:
         source_diff = source_diff[:max_chars].rstrip() + "\n[Остальная часть diff будет показана ниже без изменений.]"
         log("Diff для AI-сводки сокращен до {} символов.".format(max_chars))
-    model = os.environ.get("OPENAI_SUMMARY_MODEL", "gpt-5-mini").strip() or "gpt-5-mini"
-    payload = {
-        "model": model,
-        "instructions": (
-            "Ты готовишь короткую сводку изменений Контент-плана для Telegram. "
-            "Верни только 3-5 коротких строк на русском. Каждая строка должна описывать "
-            "заметный факт из diff. Не добавляй факты, имена, даты или ссылки, которых нет "
-            "в diff. Не используй Markdown, HTML, заголовки и вступления."
-        ),
-        "input": source_diff,
-        "max_output_tokens": 350,
-    }
-    response = openai_response_text(payload, timeout)
+    response = ai_summary_response_text(source_diff, timeout)
     lines = []
     for raw_line in response.splitlines():
         line = normalize_space(raw_line).lstrip("-• ").strip()
@@ -664,7 +732,7 @@ def build_ai_content_plan_summary(diff, timeout):
         if len(lines) == 5:
             break
     if not lines:
-        raise MonitorError("OpenAI вернул пустую AI-сводку.")
+        raise MonitorError("AI-провайдер вернул пустую сводку.")
     return "\n".join(lines)
 
 

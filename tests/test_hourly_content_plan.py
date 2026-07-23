@@ -92,6 +92,35 @@ class HourlyContentPlanTests(unittest.TestCase):
         self.assertIn("AI-сводка недоступна", messages[0])
         self.assertIn(original_diff, messages[0])
 
+    def test_groq_provider_uses_llama_default_model(self):
+        captured = []
+
+        def fake_groq(payload, _timeout):
+            captured.append(payload)
+            return "Изменена программа закрытия."
+
+        old_groq_key = os.environ.get("GROQ_API_KEY")
+        old_provider = os.environ.get("AI_SUMMARY_PROVIDER")
+        os.environ["GROQ_API_KEY"] = "test-key"
+        os.environ.pop("AI_SUMMARY_PROVIDER", None)
+        try:
+            with mock.patch.object(monitor, "groq_chat_completion_text", side_effect=fake_groq):
+                summary = monitor.build_ai_content_plan_summary("Контент-план: тестовый diff.", timeout=10)
+        finally:
+            if old_groq_key is None:
+                os.environ.pop("GROQ_API_KEY", None)
+            else:
+                os.environ["GROQ_API_KEY"] = old_groq_key
+            if old_provider is None:
+                os.environ.pop("AI_SUMMARY_PROVIDER", None)
+            else:
+                os.environ["AI_SUMMARY_PROVIDER"] = old_provider
+
+        self.assertEqual(summary, "Изменена программа закрытия.")
+        self.assertEqual(captured[0]["model"], "llama-3.3-70b-versatile")
+        self.assertEqual(captured[0]["messages"][0]["role"], "system")
+        self.assertEqual(captured[0]["messages"][1]["content"], "Контент-план: тестовый diff.")
+
     def test_long_diff_is_chunked_below_telegram_limit(self):
         lines = ["Контент-план: строка «{}», колонка «Зал» - было «пусто», стало «{}».".format(index, "Текст " * 40) for index in range(70)]
         chunks = monitor.telegram_message_chunks("TS26: обновления за час", "\n".join(lines), subtitle="Контент-план")
