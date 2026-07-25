@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import ae_content_plan
 import ae_render_queue
@@ -41,6 +41,13 @@ def env_int(name, default):
         return default
 
 
+def load_time_zone(name, fallback_offset_hours):
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return _dt.timezone(_dt.timedelta(hours=fallback_offset_hours), name)
+
+
 APP_NAME = "tg-pushes-TS26"
 APP_VERSION = "2026-07-23.04"
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
@@ -58,7 +65,7 @@ MAX_CHANGE_MESSAGES = 12
 MAX_MACOS_BODY_LENGTH = 220
 MAX_TELEGRAM_MESSAGE_CHARS = 3800
 CONTENT_PLAN_DIGEST_STATE_KEY = "_content_plan_hourly_digest"
-CONTENT_PLAN_TIME_ZONE = ZoneInfo("Europe/Moscow")
+CONTENT_PLAN_TIME_ZONE = load_time_zone("Europe/Moscow", 3)
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"

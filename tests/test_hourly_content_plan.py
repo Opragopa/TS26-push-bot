@@ -30,6 +30,12 @@ class HourlyContentPlanTests(unittest.TestCase):
         self.assertEqual(state[monitor.CONTENT_PLAN_DIGEST_STATE_KEY]["last_flush_hour"], "2026-07-22T15")
         send.assert_not_called()
 
+    def test_time_zone_falls_back_to_moscow_offset_without_tzdata(self):
+        with mock.patch.object(monitor, "ZoneInfo", side_effect=monitor.ZoneInfoNotFoundError("No time zone")):
+            timezone = monitor.load_time_zone("Europe/Moscow", 3)
+        self.assertEqual(timezone.utcoffset(None), dt.timedelta(hours=3))
+        self.assertEqual(timezone.tzname(None), "Europe/Moscow")
+
     def test_queue_survives_state_save_and_load(self):
         state = {}
         monitor.queue_content_plan_change(state, "Контент-план: тестовый diff.", captured_at="2026-07-22 14:30:00")
