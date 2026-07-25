@@ -3,6 +3,13 @@
  * Rebuilds one Render Queue item because aerender -reuse may leave it stopped.
  */
 (function () {
+    if (typeof app === "undefined") {
+        if (typeof console !== "undefined" && console.log) {
+            console.log("ae_render_open_queue.jsx is an After Effects script template and should not be executed directly.");
+        }
+        return;
+    }
+
     function fail(message) {
         throw new Error("AE open-project render: " + message);
     }
@@ -26,11 +33,12 @@
         return file.fsName.replace(/\\/g, "/").toLowerCase();
     }
 
-    var paramsPath = __PARAMS_PATH__;
+    var paramsPath = typeof __PARAMS_PATH__ === "undefined" ? "" : __PARAMS_PATH__;
     var errorFile = new File(paramsPath + ".render.error");
     var doneFile = new File(paramsPath + ".render.done");
 
     try {
+        if (!paramsPath) fail("Не передан путь к JSON-параметрам.");
         var params = eval("(" + readText(new File(paramsPath)) + ")");
         var source = new File(params.source_project_path);
         if (!app.project || !app.project.file || normalizedPath(app.project.file) !== normalizedPath(source)) {

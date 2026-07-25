@@ -3,6 +3,13 @@
  * the project, and puts exactly one item into its Render Queue.
  */
 (function () {
+    if (typeof app === "undefined") {
+        if (typeof console !== "undefined" && console.log) {
+            console.log("ae_prepare_project.jsx is an After Effects script template and should not be executed directly.");
+        }
+        return;
+    }
+
     function fail(message) {
         throw new Error("AE render preparation: " + message);
     }
@@ -128,7 +135,7 @@
         return renderItem.comp;
     }
 
-    var paramsPath = __PARAMS_PATH__;
+    var paramsPath = typeof __PARAMS_PATH__ === "undefined" ? "" : __PARAMS_PATH__;
 
     function writeFailure(message) {
         var file = new File(paramsPath + ".error");
@@ -139,6 +146,7 @@
     }
 
     try {
+        if (!paramsPath) fail("Не передан путь к JSON-параметрам.");
         var params = eval("(" + readText(new File(paramsPath)) + ")");
         var source = new File(params.source_project_path);
         if (!source.exists) fail("Не найден исходный проект: " + source.fsName);
