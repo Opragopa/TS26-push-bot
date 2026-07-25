@@ -7,4 +7,5 @@ __pycache__/
 state/
 data/
 oauth_client.json
+google_oauth_user.json
 client_secret*.json

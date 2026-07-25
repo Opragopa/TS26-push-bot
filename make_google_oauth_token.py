@@ -7,7 +7,10 @@ import os
 import sys
 from pathlib import Path
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.file",
+]
 
 
 def find_client_secret_path(argv):

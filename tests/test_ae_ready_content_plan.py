@@ -74,6 +74,71 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(first["ИМЯ_КОМПОЗИЦИИ"], "Амфитеатр/Тема открытия")
         self.assertTrue(records["badges"])
 
+    def test_session_comp_name_shortens_plenary_amphitheater(self):
+        self.assertEqual(
+            ae_content_plan.session_comp_name("АМФИТЕАТР ОСНОВНАЯ / ПЛЕНАРНАЯ", "Выборы 2026"),
+            "АМФИТЕАТР/Выборы 2026",
+        )
+
+    def test_parser_keeps_name_and_position_in_one_badge(self):
+        sample_tsv = """ВРЕМЯ\tАмфитеатр\tУРАЛ 1 (синий) (200 мест)\tУРАЛ 2 (красный) (200 мест)
+ДЕНЬ 1  ·  20.07  ·  [ТЕМА: Тест]
+17:30-19:00\tСпикер: Памфилова Элла Александровна, Председатель Центральной избирательной комиссии Российской Федерации\t\t
+"""
+        rows = ae_content_plan.parse_table_rows(sample_tsv)
+        records = ae_content_plan.build_records(rows, corrector=None)
+
+        self.assertEqual(len(records["badges"]), 1)
+        self.assertEqual(records["badges"][0]["ФИО спикера"], "Памфилова Элла Александровна")
+        self.assertIn("Председатель Центральной избирательной комиссии Российской Федерации", records["badges"][0]["Должность"])
+
+    def test_parser_shortens_topic_and_keeps_concise_description(self):
+        rows = [
+            ["ВРЕМЯ", "Амфитеатр", "УРАЛ 1 (синий) (200 мест)", "УРАЛ 2 (красный) (200 мест)"],
+            ["ДЕНЬ 1  ·  20.07  ·  [ТЕМА: Тест]"],
+            [
+                "16:45-17:30",
+                "ДЕЛОВОЕ открытие смены\nУстановочная встреча ТС-2026. Установка по деловой игре от Института социальной архитектуры.\nСпикеры:\n1) Литвиненко Егор Васильевич, Заместитель руководителя, Федеральное агентство по делам молодежи (Росмолодежь)",
+                "",
+                "",
+            ],
+        ]
+        records = ae_content_plan.build_records(rows, corrector=None)
+
+        session = records["legacy_sessions"][0]
+        self.assertEqual(session["ТЕМА"], "ДЕЛОВОЕ открытие смены")
+        self.assertEqual(session["ОПИСАНИЕ"], "Установочная встреча ТС-2026")
+
+    def test_parser_drops_description_when_it_only_repeats_title(self):
+        topic, description = ae_content_plan.normalize_topic_description(
+            "Образ будущего: Россия-2036",
+            'Встреча "Образ будущего: Россия-2036".',
+        )
+        self.assertEqual(topic, "Образ будущего: Россия-2036")
+        self.assertEqual(description, "")
+
+    def test_parser_keeps_main_meeting_day_label(self):
+        topic, description = ae_content_plan.normalize_topic_description(
+            "Платформа суверенного развития",
+            'Главная встреча дня "Платформа суверенного развития".',
+        )
+        self.assertEqual(topic, "Платформа суверенного развития")
+        self.assertEqual(description, "Главная встреча дня")
+
+    def test_parser_splits_numbered_speakers_with_positions(self):
+        sample_tsv = """ВРЕМЯ\tАмфитеатр\tУРАЛ 1 (синий) (200 мест)\tУРАЛ 2 (красный) (200 мест)
+ДЕНЬ 1  ·  20.07  ·  [ТЕМА: Тест]
+16:45-17:30\tСпикеры: 1) Иванов Иван Иванович, Заместитель руководителя Росмолодежи 2) Петров Петр Петрович, программный директор форума\t\t
+"""
+        rows = ae_content_plan.parse_table_rows(sample_tsv)
+        records = ae_content_plan.build_records(rows, corrector=None)
+
+        self.assertEqual(len(records["badges"]), 2)
+        self.assertEqual(records["badges"][0]["ФИО спикера"], "Иванов Иван Иванович")
+        self.assertEqual(records["badges"][1]["ФИО спикера"], "Петров Петр Петрович")
+        self.assertEqual(records["badges"][0]["Должность"], "Заместитель руководителя Росмолодежи")
+        self.assertEqual(records["badges"][1]["Должность"], "программный директор форума")
+
     def test_sync_skips_when_source_hash_unchanged(self):
         state = {monitor.AE_READY_STATE_KEY: {"source_hash": "same", "spreadsheet_id": "ae123"}}
         with mock.patch.object(monitor, "fetch_sheet", return_value={"hash": "same", "cells": [], "rows": 0, "bytes": 0}), mock.patch.object(monitor, "get_google_client") as google:
@@ -113,6 +178,43 @@ class AEReadyContentPlanTests(unittest.TestCase):
             with mock.patch.object(monitor, "ae_correction_provider_request", side_effect=[monitor.ConfigError("no key"), {"topic": "Тема", "confidence": 0.9}]):
                 corrector = monitor.build_ae_llm_corrector(self.args)
                 result = corrector({"raw_text": "test"})
+        finally:
+            for key, value in old_values.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertEqual(result["topic"], "Тема")
+
+    def test_needs_llm_correction_for_long_or_numbered_cells(self):
+        self.assertTrue(
+            ae_content_plan.needs_llm_correction(
+                "Главная встреча дня 1) Иванов Иван Иванович, модератор 2) Петров Петр Петрович, эксперт",
+                "Очень длинная тема, которая выглядит скорее как целый абзац, а не как краткий заголовок мероприятия",
+                "Очень длинное описание, которое тоже не должно без LLM попадать в итоговую таблицу как есть",
+                [{"name": "Иванов Иван Иванович"}],
+            )
+        )
+
+    def test_extract_json_object_text_recovers_json_from_wrapper(self):
+        text = 'Вот ответ\n```json\n{"topic":"Тема","confidence":0.9}\n```\nспасибо'
+        self.assertEqual(monitor.extract_json_object_text(text), '{"topic":"Тема","confidence":0.9}')
+
+    def test_extract_chat_message_text_reads_openai_style_array(self):
+        content = [
+            {"type": "text", "text": '{"topic":"Тема"}'},
+            {"type": "ignored", "value": "unused"},
+        ]
+        self.assertEqual(monitor.extract_chat_message_text(content), '{"topic":"Тема"}\nunused')
+
+    def test_ae_correction_retries_after_invalid_json(self):
+        old_values = {key: os.environ.get(key) for key in ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL")}
+        os.environ["DEEPSEEK_API_KEY"] = "deepseek-test"
+        try:
+            responses = ['{"topic":"broken', '{"topic":"Тема","confidence":0.9}']
+            with mock.patch.object(monitor, "chat_completion_text", side_effect=responses):
+                result = monitor.ae_correction_provider_request("deepseek", {"raw_text": "test"}, timeout=10)
         finally:
             for key, value in old_values.items():
                 if value is None:

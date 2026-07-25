@@ -174,6 +174,42 @@ DEEPSEEK_MODEL=deepseek-v4-pro
 
 `AE_READY_SPREADSHEET_ID` можно не задавать: при первом `/ae_sync` бот создаст новую таблицу и сохранит id в `sheet_state.json`. Если таблицу нужно расшарить на ваш Google-аккаунт, задайте `AE_READY_SHARE_EMAILS=email@example.com`.
 
+## Рендер плашек через aerender
+
+После подтверждения новой плашки бот записывает строку в Google Sheets и ставит задание в `data/ae_render_queue.json`. Отдельный процесс `ae_render_worker.py` запускает `person_plates_from_sheet.jsx` в ручном режиме: генератор дублирует `MASTER-COMP`, заполняет имя и должность, называет новую композицию `Фамилия Имя` без префикса и сам добавляет её в Render Queue. Затем `aerender` рендерит именно созданную композицию. При включённом `reuse_open_project` изменения происходят в открытом проекте; без него используется временная копия `.aep`.
+
+В `ae_render_config.json` у каждого типа задания свой обязательный Output Module: `DVX 3 no audio` для `session_topic` и `High Quality with Alpha` для `plaque`. Для «Огня смыслов» пресет будет добавлен вместе с его AE-шаблоном. Если у After Effects нет указанного пресета, воркер остановит задание с понятной ошибкой.
+
+Маршруты уже настроены так:
+
+- `plaque` - `.../04_ПЛАШКИ/Запись`;
+- `session_topic` - `.../ТЕМЫ СЕССИЙ/<СМЕНА>/День <N>`;
+- `fire_of_meanings` - `.../06_ОГОНЬ СМЫСЛОВ`.
+
+Запуск воркера с прямым чтением Google Sheets:
+
+```bash
+python3 ae_render_worker.py --poll-sheets
+```
+
+Для безопасной проверки одной задачи:
+
+```bash
+python3 ae_render_worker.py --once --poll-sheets
+```
+
+Только проверить OAuth и чтение таблиц, не запуская After Effects:
+
+```bash
+python3 ae_render_worker.py --poll-sheets --poll-only
+```
+
+Для постоянной работы на Mac после заполнения конфига дважды кликните `install_ae_render_worker_macos.command`. Остановить воркер можно через `stop_ae_render_worker_macos.command`.
+
+Чтобы локальный воркер сам читал таблицы, запустите его с флагом `--poll-sheets`. Укажите в `ae_render_config.json` путь к локальному OAuth user JSON, `ae_ready_spreadsheet_id` и карту `shift_by_day`. Хостинговый бот при этом только записывает Google Sheets.
+
+Смены для тем сессий задаются в `templates.session_topic.shift_by_day`. Они не присутствуют в колонках `content_plan_sessions`, поэтому намеренно не угадываются. После каждого обновления AE-ready бот поставит в очередь новые темы, у которых заполнены `ДЕНЬ`, `ТЕМА`, `ОПИСАНИЕ` и соответствующая смена.
+
 Для авто-создания таблицы Google-авторизация использует scope `drive.file`. Если OAuth-токен был создан раньше только для `spreadsheets`, пересоздайте `GOOGLE_OAUTH_USER_JSON`.
 
 Команды админа:

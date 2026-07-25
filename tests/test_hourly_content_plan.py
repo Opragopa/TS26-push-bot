@@ -70,6 +70,31 @@ class HourlyContentPlanTests(unittest.TestCase):
         self.assertIn("Добавлено открытие.", sent[0][2])
         self.assertIn("Полный diff", sent[0][2])
 
+    def test_content_plan_recipients_are_admins_and_selected_users(self):
+        state = {"_content_plan_chat_ids": ["333"]}
+        sheet = {
+            "label": "Контент-план",
+            "url": "https://docs.google.com/spreadsheets/d/test/edit?gid=1",
+            "extra_chat_ids": ["222"],
+        }
+        old_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        old_admin_ids = os.environ.get("TELEGRAM_ADMIN_CHAT_IDS")
+        os.environ["TELEGRAM_CHAT_ID"] = "111"
+        os.environ["TELEGRAM_ADMIN_CHAT_IDS"] = "999"
+        try:
+            recipients = monitor.recipient_chat_ids(sheet, state=state)
+        finally:
+            if old_chat_id is None:
+                os.environ.pop("TELEGRAM_CHAT_ID", None)
+            else:
+                os.environ["TELEGRAM_CHAT_ID"] = old_chat_id
+            if old_admin_ids is None:
+                os.environ.pop("TELEGRAM_ADMIN_CHAT_IDS", None)
+            else:
+                os.environ["TELEGRAM_ADMIN_CHAT_IDS"] = old_admin_ids
+
+        self.assertEqual(recipients, ["999", "222", "333"])
+
     def test_openai_failure_keeps_full_diff(self):
         state = {}
         original_diff = "Контент-план: строка «10:00», колонка «Зал» - было «пусто», стало «Открытие»."
@@ -208,6 +233,55 @@ class HourlyContentPlanTests(unittest.TestCase):
         self.assertNotIn("https://docs.google.com", user_message)
         self.assertIn("https://docs.google.com/row280", admin_message)
         self.assertEqual(state["_plaque_sessions"], {})
+
+    def test_plaque_access_is_limited_to_admins_user_mode_and_allowlist(self):
+        state = {"_plaque_chat_ids": ["555"]}
+        sheets = [self.sheet]
+        old_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        old_admin_ids = os.environ.get("TELEGRAM_ADMIN_CHAT_IDS")
+        os.environ["TELEGRAM_CHAT_ID"] = "111"
+        os.environ["TELEGRAM_ADMIN_CHAT_IDS"] = "999"
+        try:
+            self.assertTrue(monitor.can_use_plaque_form(sheets, state, "999"))
+            self.assertTrue(monitor.can_use_plaque_form(sheets, state, "555"))
+            self.assertFalse(monitor.can_use_plaque_form(sheets, state, "777"))
+            monitor.set_user_mode_chat(state, "777", True)
+            self.assertTrue(monitor.can_use_plaque_form(sheets, state, "777"))
+        finally:
+            if old_chat_id is None:
+                os.environ.pop("TELEGRAM_CHAT_ID", None)
+            else:
+                os.environ["TELEGRAM_CHAT_ID"] = old_chat_id
+            if old_admin_ids is None:
+                os.environ.pop("TELEGRAM_ADMIN_CHAT_IDS", None)
+            else:
+                os.environ["TELEGRAM_ADMIN_CHAT_IDS"] = old_admin_ids
+
+    def test_start_screen_hides_plaque_button_without_access(self):
+        sent = []
+
+        def fake_send(_args, chat_id, title, message, reply_markup=None):
+            sent.append((chat_id, title, message, reply_markup))
+
+        with mock.patch.object(monitor, "send_plain_chat_message", side_effect=fake_send):
+            monitor.send_start_screen(self.args, "777", state={}, is_content_recipient=False, can_use_plaque=False)
+
+        self.assertEqual(sent[0][1], "TS26: старт")
+        self.assertIn("Если вам нужен доступ к плашкам", sent[0][2])
+        self.assertIsNone(sent[0][3])
+
+    def test_plaque_access_report_marks_added_users(self):
+        state = {
+            "_plaque_chat_ids": ["555"],
+            "_known_chats": {
+                "555": {"title": "Иван Иванов", "username": "ivan", "type": "private", "seen_at": "2026-07-25 10:00:00"},
+                "777": {"title": "Петр Петров", "username": "", "type": "private", "seen_at": "2026-07-25 09:00:00"},
+            },
+        }
+        report = monitor.plaque_access_report(state)
+        self.assertIn("Добавленные chat_id: 555", report)
+        self.assertIn("555 - Иван Иванов (@ivan) - доступ есть", report)
+        self.assertIn("777 - Петр Петров - нет доступа", report)
 
 
 if __name__ == "__main__":

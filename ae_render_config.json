@@ -1,0 +1,62 @@
+{
+  "project_path": "/Users/opragopa/Desktop/Workspace/2026/07_Июль/!_Территория смыслов PROJECT/Территория смыслов.aep",
+  "afterfx_bin": "/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/MacOS/After Effects",
+  "afterfx_bundle_id": "com.adobe.AfterEffects.application",
+  "afterfx_launch_method": "osascript_doscript",
+  "reuse_open_project": true,
+  "aerender_bin": "/Applications/Adobe After Effects 2026/aerender",
+  "aerender_working_dir": "/Applications/Adobe After Effects 2026",
+  "google_oauth_user_file": "/Users/opragopa/Documents/tg-pushes-TS26/google_oauth_user.json",
+  "env_file": "/Users/opragopa/Documents/tg-pushes-TS26/.env",
+  "queue_path": "data/ae_render_queue.json",
+  "temp_project_dir": "/private/tmp/ts26-ae-render",
+  "output_module_templates": {
+    "session_topic": "DVX 3 no audio",
+    "plaque": "High Quality with Alpha",
+    "fire_of_meanings": ""
+  },
+  "render_settings_template": "",
+  "prepare_timeout_seconds": 180,
+  "person_plates_script_path": "/Users/opragopa/PYTHON_PROJECTS/sheet2comp-ae/person_plates_from_sheet.jsx",
+  "routes": {
+    "session_topics_root": "/Users/opragopa/Yandex.Disk.localized/Оперативная графика ТС 2026/ГРАФИКА/ТЕМЫ СЕССИЙ",
+    "plaque_output_dir": "/Users/opragopa/Yandex.Disk.localized/Заставки ТС 2026/Трансляция/Динамика/04_ПЛАШКИ/Запись",
+    "fire_of_meanings_output_dir": "/Users/opragopa/Yandex.Disk.localized/Заставки ТС 2026/Огонь смыслов/06_ОГОНЬ СМЫСЛОВ"
+  },
+  "templates": {
+    "plaque": {
+      "comp_name": "MASTER-COMP",
+      "name_layer": "ФИО спикера",
+      "position_layer": "Должность",
+      "target_folder_path": "!_COMPS/!!!_ПЛАШКИ НА РЕНДЕР/Запись"
+    },
+    "session_topic": {
+      "comp_pattern": "{shift}_.*Заставка с темами_.*альт",
+      "topic_layer": "ТЕМА",
+      "description_layer": "ОПИСАНИЕ",
+      "shift_by_day": {
+        "1": "ЕДИНСТВО",
+        "2": "ПРАВДА",
+        "3": "РОДИНА",
+        "4": "",
+        "5": ""
+      }
+    }
+  },
+  "plaque_spreadsheet_id": "1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js",
+  "plaque_worksheet_gid": 1399617264,
+  "plaque_start_row": 280,
+  "plaque_name_col": 1,
+  "plaque_position_col": 2,
+  "plaque_note_col": 5,
+  "plaque_note_text": "<-- добавлено через ТГ бота",
+  "ae_ready_spreadsheet_id": "",
+  "ae_ready_sessions_worksheet": "content_plan_sessions",
+  "shift_by_day": {
+    "1": "",
+    "2": "",
+    "3": "",
+    "4": "",
+    "5": ""
+  }
+}

@@ -54,6 +54,25 @@ ROLE_RE = re.compile(r"(?is)(Эксперты?|Эксперт|Гости|Спи�
 STOP_RE = re.compile(r"(?is)(?:^|\s)(?:▶\s*)?(?:Статус|СЦЕНАРИЙ(?:\s+ДЛЯ\s+РПГ)?|ЗАЛ|СЕТАП|РАЙДЕР|КОНТЕНТ|ВОЛОНТЕРЫ|Техзапрос|Техзадание|Место)\s*:")
 SERVICE_RE = re.compile(r"(?i)^(перерыв|обед|ужин|завтрак|зарядка|отъезд|подъ[её]м|рефлексия|креатон(?:\s*-.*)?|\d+)$")
 NAME_RE = re.compile(r"((?:[А-ЯЁA-Z]\.\s*){1,3}[А-ЯЁA-Z]?\.\s*[А-ЯЁA-Z][а-яё-]+|[А-ЯЁ][а-яё-]+\s+[А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+)?)")
+POSITION_WORDS = {
+    "председатель", "заместитель", "директор", "руководитель", "программный",
+    "куратор", "министр", "эксперт", "модератор", "ведущий", "ректор",
+    "профессор", "депутат", "сенатор", "глава", "начальник", "советник",
+    "проректор", "мастер", "координатор", "преподаватель", "специалист",
+    "аналитик", "архитектор", "редактор", "продюсер", "основатель",
+}
+DESCRIPTION_LABELS = [
+    "Главная встреча дня",
+    "Пленарная сессия",
+    "Установочная встреча",
+    "Шоу-защита проектов",
+    "Презентация проекта",
+    "Мастер-класс",
+    "Дискуссия",
+    "Лекция",
+    "Дебаты",
+    "Встреча",
+]
 
 
 class AEContentPlanError(Exception):
@@ -98,6 +117,7 @@ def clean_venue_header(value):
 def clean_topic(value):
     text = inline_text(value)
     text = re.sub(r"^(?:тема|название|сессия)\s*:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:^|[\s(])\d+\)\s*", " ", text)
     text = re.sub(r"^[▶•\s]+", "", text)
     text = re.sub(r"\s+(?:▶\s*)?(?:статус|эксперты?|спикеры?|гости?|модератор|ведущий|зал|сетап|райдер|контент|техзадание)\s*:.*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*[-–—]\s*ПРЕЗЕНТАЦИ[ЯИ]\b.*$", "", text, flags=re.IGNORECASE)
@@ -106,14 +126,75 @@ def clean_topic(value):
 
 def clean_position(value):
     text = inline_text(value)
+    text = re.sub(r"(?:^|[\s(])\d+\)\s*", " ", text)
     text = re.sub(r"\((?:подтвержден[аы]?|уточняется)\)", " ", text, flags=re.IGNORECASE)
     text = re.split(r"(?i)\s+(?:СЦЕНАРИЙ(?:\s+ДЛЯ\s+РПГ)?|ЗАЛ|СЕТАП|РАЙДЕР|КОНТЕНТ|ВОЛОНТЕРЫ|Техзапрос|Техзадание)\s*:?", text, maxsplit=1)[0]
     return inline_text(text).strip(" .,-–—;")
 
 
+def first_sentence(text):
+    value = inline_text(text)
+    if not value:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", value, maxsplit=1)
+    return parts[0].strip(" \"'«»„“”.,;:-–—")
+
+
+def short_description_label(text):
+    value = inline_text(text)
+    for label in DESCRIPTION_LABELS:
+        pattern = r"^{}\b".format(re.escape(label))
+        if re.search(pattern, value, flags=re.IGNORECASE):
+            return label
+    return ""
+
+
+def trim_repeated_topic(description, topic):
+    desc = inline_text(description)
+    top = clean_topic(topic)
+    if not desc or not top:
+        return desc
+    patterns = [
+        r'[«"]?\s*{}\s*[»"]?'.format(re.escape(top)),
+        r"\b{}\b".format(re.escape(top)),
+    ]
+    for pattern in patterns:
+        desc = re.sub(pattern, " ", desc, flags=re.IGNORECASE)
+    return inline_text(desc).strip(" \"'«»„“”.,;:-–—")
+
+
+def normalize_topic_description(topic, description):
+    topic_text = clean_topic(topic)
+    description_text = clean_position(description)
+    if topic_text and re.search(r"[.!?]\s+", topic_text):
+        topic_text = first_sentence(topic_text)
+    if description_text:
+        description_text = trim_repeated_topic(description_text, topic_text)
+        label = short_description_label(description_text)
+        sentence = first_sentence(description_text)
+        if label and normalize_key(description_text) == normalize_key(label):
+            description_text = "" if normalize_key(label) == normalize_key("Встреча") else label
+        elif sentence and len(sentence.split()) <= 8:
+            description_text = sentence
+            if normalize_key(description_text) == normalize_key("Встреча"):
+                description_text = ""
+        else:
+            description_text = ""
+    if description_text and normalize_key(description_text) == normalize_key(topic_text):
+        description_text = ""
+    return topic_text, description_text
+
+
+def comp_venue_name(value):
+    venue = clean_venue_header(value)
+    if normalize_key(venue) == normalize_key("АМФИТЕАТР ОСНОВНАЯ / ПЛЕНАРНАЯ"):
+        return "АМФИТЕАТР"
+    return venue
+
+
 def session_comp_name(venue_name, topic_title):
     topic = clean_topic(topic_title)
-    venue = clean_venue_header(venue_name)
+    venue = comp_venue_name(venue_name)
     return "{}/{}".format(venue, topic) if venue and topic else topic
 
 
@@ -162,7 +243,8 @@ def strip_file_tokens(text):
 
 
 def extract_topic_and_description(cell):
-    text = inline_text(cell)
+    raw_text = str(cell or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = inline_text(raw_text)
     topic_match = re.search(
         r"(?is)(?:^|\s)Тема\s*:\s*(.+?)(?=\s+(?:Эксперты?|Гости|Спикеры?|Эксперт|Модератор|Ведущий|СЦЕНАРИЙ(?:\s+ДЛЯ\s+РПГ)?|ЗАЛ|СЕТАП|РАЙДЕР|КОНТЕНТ)\s*:|$)",
         text,
@@ -170,15 +252,33 @@ def extract_topic_and_description(cell):
     if topic_match:
         topic = clean_topic(topic_match.group(1))
         description = strip_file_tokens(text[: topic_match.start()]).strip(" -—")
-        return topic, description
+        return normalize_topic_description(topic, description)
+    head_lines = []
+    for raw_line in raw_text.splitlines():
+        line = inline_text(raw_line)
+        if not line:
+            continue
+        role_match = ROLE_RE.search(line)
+        if role_match:
+            prefix = inline_text(line[: role_match.start()])
+            if prefix:
+                head_lines.append(prefix)
+            break
+        head_lines.append(line)
+    if len(head_lines) >= 2:
+        topic = head_lines[0]
+        description = " ".join(head_lines[1:])
+        return normalize_topic_description(topic, description)
     first_role = ROLE_RE.search(text)
     head = text[: first_role.start()] if first_role else text
     head = strip_file_tokens(head).strip(" -—")
     quote = re.search(r"«([^»\n]{8,})»", head) or re.search(r"\"([^\"\n]{8,})\"", head)
     if quote:
-        return clean_topic(quote.group(1)), head
+        return normalize_topic_description(quote.group(1), head)
     if first_role and len(head) > 10 and not SERVICE_RE.match(head):
-        return clean_topic(head), head
+        sentence = first_sentence(head)
+        description = head[len(sentence) :].strip(" -—")
+        return normalize_topic_description(sentence or head, description or head)
     return "", ""
 
 
@@ -197,6 +297,8 @@ def validate_person_name(value):
     parts = [part.strip(" .,-–—()[]") for part in re.split(r"[\s,;]+", text) if part.strip(" .,-–—()[]")]
     if len(parts) < 2 or len(parts) > 4:
         return ""
+    if parts and parts[0].casefold() in POSITION_WORDS:
+        return ""
     if not all(re.fullmatch(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’.:-]*", part) for part in parts):
         return ""
     return " ".join(parts).replace(".", ". ")
@@ -205,9 +307,28 @@ def validate_person_name(value):
 def split_people_block(block):
     text = STOP_RE.split(inline_text(block), maxsplit=1)[0]
     text = re.sub(r"\((?:подтвержден[аы]?|уточняется)\)", " ", text, flags=re.IGNORECASE)
-    starts = [match.start(1) for match in NAME_RE.finditer(text) if validate_person_name(match.group(1))]
-    if not starts:
+    matches = [
+        {"start": match.start(1), "end": match.end(1), "name": validate_person_name(match.group(1))}
+        for match in NAME_RE.finditer(text)
+    ]
+    matches = [item for item in matches if item["name"]]
+    if not matches:
         return []
+    accepted = [matches[0]]
+    for item in matches[1:]:
+        fragment = text[accepted[-1]["end"] : item["start"]]
+        stripped = fragment.strip()
+        if (
+            not stripped
+            or ";" in fragment
+            or "\n" in fragment
+            or re.search(r"(?:^|[\s,;])\d+\)\s*$", fragment)
+            or re.search(r"(?:^|[\s,;])[•▶-]\s*$", fragment)
+            or re.fullmatch(r"[,/|&]+", stripped)
+            or re.fullmatch(r",?\s*(?:и|and|&)\s*", stripped, flags=re.IGNORECASE)
+        ):
+            accepted.append(item)
+    starts = [item["start"] for item in accepted]
     starts.append(len(text))
     return [text[starts[i] : starts[i + 1]].strip(" ;.-") for i in range(len(starts) - 1)]
 
@@ -262,6 +383,21 @@ def graphic_type(cell):
     return "card" if "мастер-класс" in text or "программа по выбору" in text else "badge"
 
 
+def needs_llm_correction(cell, topic, description, people):
+    text = inline_text(cell)
+    if not topic or not people:
+        return True
+    if re.search(r"https?://|\S+\.(?:docx|pdf|pptx)", text, re.IGNORECASE):
+        return True
+    if len(topic) > 90 or len(description) > 80:
+        return True
+    if normalize_key(description) and normalize_key(description) == normalize_key(topic):
+        return True
+    if re.search(r"(?:^|[\s(])\d+\)\s*", text):
+        return True
+    return False
+
+
 def apply_llm_correction(parsed, correction, confidence_threshold):
     if not isinstance(correction, dict):
         return parsed, False, 0.0, ["LLM вернула не JSON-объект."]
@@ -279,7 +415,10 @@ def apply_llm_correction(parsed, correction, confidence_threshold):
     elif topic and result.get("topic"):
         warnings.append("LLM topic отличается от регулярного parse; оставлен регулярный.")
     description = inline_text(correction.get("description", ""))
-    if description:
+    topic, description = normalize_topic_description(topic or result.get("topic", ""), description or result.get("description", ""))
+    if topic and (not result.get("topic") or normalize_key(topic) == normalize_key(result.get("topic"))):
+        result["topic"] = topic
+    if description or result.get("description"):
         result["description"] = description
     fmt = inline_text(correction.get("format", ""))
     if fmt:
@@ -377,7 +516,7 @@ def build_records(rows, corrector=None, confidence_threshold=0.82):
             parsed = {"topic": topic, "description": description, "format": detect_format(cell, description), "people": people}
             llm_applied = False
             llm_confidence = ""
-            if corrector and (not topic or not people or re.search(r"https?://|\S+\.(?:docx|pdf|pptx)", inline_text(cell), re.IGNORECASE)):
+            if corrector and needs_llm_correction(cell, topic, description, people):
                 correction = corrector({
                     "source_cell": source_cell,
                     "day": current_day["day"],

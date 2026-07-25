@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Small file-backed render queue shared by the Telegram bot and worker."""
+
+import datetime as _dt
+import fcntl
+import json
+import os
+import stat
+import tempfile
+import uuid
+from pathlib import Path
+
+
+QUEUE_VERSION = 1
+
+
+class RenderQueueError(Exception):
+    pass
+
+
+def default_queue_path():
+    return Path(__file__).resolve().parent / "data" / "ae_render_queue.json"
+
+
+def now_text():
+    return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+def load_queue_unlocked(queue_path):
+    if not queue_path.exists():
+        return {"version": QUEUE_VERSION, "jobs": []}
+    try:
+        data = json.loads(queue_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RenderQueueError("Не удалось прочитать очередь {}: {}".format(queue_path, exc))
+    if not isinstance(data, dict) or not isinstance(data.get("jobs"), list):
+        raise RenderQueueError("Некорректный формат очереди {}".format(queue_path))
+    return data
+
+
+def save_queue_unlocked(queue_path, data):
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_stat = queue_path.stat() if queue_path.exists() else None
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".ae_render_queue_", suffix=".json", dir=str(queue_path.parent))
+    try:
+        if previous_stat is not None:
+            os.fchmod(descriptor, stat.S_IMODE(previous_stat.st_mode))
+            try:
+                os.fchown(descriptor, previous_stat.st_uid, previous_stat.st_gid)
+            except PermissionError:
+                pass
+        else:
+            os.fchmod(descriptor, 0o664)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write("\n")
+        os.replace(temporary_name, queue_path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+
+
+def locked_queue(queue_path):
+    queue_path = Path(queue_path).expanduser()
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = queue_path.with_suffix(queue_path.suffix + ".lock")
+    lock_stream = lock_path.open("a+", encoding="utf-8")
+    fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+    return queue_path, lock_stream
+
+
+def enqueue(queue_path, kind, payload, source_key=""):
+    queue_path, lock_stream = locked_queue(queue_path)
+    try:
+        data = load_queue_unlocked(queue_path)
+        source_key = str(source_key or "").strip()
+        if source_key:
+            for job in data["jobs"]:
+                if job.get("source_key") == source_key and job.get("status") in {"queued", "preparing", "rendering", "done"}:
+                    return job, False
+        job = {
+            "id": uuid.uuid4().hex,
+            "kind": str(kind),
+            "payload": dict(payload or {}),
+            "source_key": source_key,
+            "status": "queued",
+            "created_at": now_text(),
+            "updated_at": now_text(),
+        }
+        data["jobs"].append(job)
+        save_queue_unlocked(queue_path, data)
+        return job, True
+    finally:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+        lock_stream.close()
+
+
+def claim_next(queue_path):
+    queue_path, lock_stream = locked_queue(queue_path)
+    try:
+        data = load_queue_unlocked(queue_path)
+        for job in data["jobs"]:
+            if job.get("status") == "queued":
+                job["status"] = "preparing"
+                job["updated_at"] = now_text()
+                save_queue_unlocked(queue_path, data)
+                return dict(job)
+        return None
+    finally:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+        lock_stream.close()
+
+
+def update_job(queue_path, job_id, **changes):
+    queue_path, lock_stream = locked_queue(queue_path)
+    try:
+        data = load_queue_unlocked(queue_path)
+        for job in data["jobs"]:
+            if job.get("id") == job_id:
+                job.update(changes)
+                job["updated_at"] = now_text()
+                save_queue_unlocked(queue_path, data)
+                return dict(job)
+        raise RenderQueueError("Задание {} не найдено в очереди".format(job_id))
+    finally:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+        lock_stream.close()

@@ -20,6 +20,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import ae_content_plan
+import ae_render_queue
 
 
 def env_bool(name, default=False):
@@ -77,6 +78,9 @@ PLAQUE_NAME_COL = int(os.environ.get("PLAQUE_NAME_COL", "1"))
 PLAQUE_POSITION_COL = int(os.environ.get("PLAQUE_POSITION_COL", "2"))
 PLAQUE_NOTE_COL = int(os.environ.get("PLAQUE_NOTE_COL", "5"))
 PLAQUE_NOTE_TEXT = os.environ.get("PLAQUE_NOTE_TEXT", "<-- добавлено через ТГ бота")
+AE_RENDER_ENABLED = env_bool("AE_RENDER_ENABLED", True)
+_ae_render_queue_value = Path(os.environ.get("AE_RENDER_QUEUE_PATH", "data/ae_render_queue.json")).expanduser()
+AE_RENDER_QUEUE_PATH = _ae_render_queue_value if _ae_render_queue_value.is_absolute() else Path(__file__).resolve().parent / _ae_render_queue_value
 KEY_COLUMN_CANDIDATES = (
     "фио",
     "ф.и.о.",
@@ -359,6 +363,23 @@ def remove_content_plan_chat_id(state, chat_id):
     return chat_id
 
 
+def content_plan_recipient_chat_ids(sheet=None, state=None):
+    sheet = sheet or {}
+    chat_ids = []
+    chat_ids.extend(admin_chat_ids())
+    chat_ids.extend(sheet.get("extra_chat_ids") or [])
+    if state is not None:
+        chat_ids.extend(content_plan_chat_ids(state))
+    if sheet.get("chat_ids"):
+        chat_ids.extend(sheet["chat_ids"])
+    result = []
+    for chat_id in chat_ids:
+        chat_id = str(chat_id).strip()
+        if chat_id and chat_id not in result:
+            result.append(chat_id)
+    return result
+
+
 def known_chats(state):
     chats = state.setdefault("_known_chats", {})
     if not isinstance(chats, dict):
@@ -399,13 +420,13 @@ def known_chat_label(chat_id, data):
 
 def recipient_chat_ids(sheet=None, state=None):
     sheet = sheet or {}
+    if is_content_plan_sheet(sheet):
+        return content_plan_recipient_chat_ids(sheet, state=state)
     if sheet.get("chat_ids"):
         chat_ids = list(sheet["chat_ids"])
     else:
         chat_ids = default_chat_ids()
         chat_ids.extend(sheet.get("extra_chat_ids") or [])
-        if state is not None and is_content_plan_sheet(sheet):
-            chat_ids.extend(content_plan_chat_ids(state))
     result = []
     for chat_id in chat_ids:
         chat_id = str(chat_id).strip()
@@ -679,9 +700,9 @@ def groq_chat_completion_text(payload, timeout):
     choices = parsed.get("choices") or []
     if choices:
         message = choices[0].get("message") or {}
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
+        text = extract_chat_message_text(message.get("content"))
+        if text:
+            return text
     raise MonitorError("Groq не вернул текст сводки.")
 
 
@@ -717,9 +738,9 @@ def chat_completion_text(provider_name, url, api_key, payload, timeout):
     choices = parsed.get("choices") or []
     if choices:
         message = choices[0].get("message") or {}
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
+        text = extract_chat_message_text(message.get("content"))
+        if text:
+            return text
     raise MonitorError("{} не вернул текст.".format(provider_name))
 
 
@@ -791,13 +812,85 @@ def strip_json_code_fence(text):
     return value.strip()
 
 
+def extract_chat_message_text(content):
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+                continue
+            if isinstance(text, list):
+                for text_part in text:
+                    if isinstance(text_part, str) and text_part.strip():
+                        parts.append(text_part.strip())
+                    elif isinstance(text_part, dict):
+                        value = text_part.get("value") or text_part.get("text")
+                        if isinstance(value, str) and value.strip():
+                            parts.append(value.strip())
+            value = item.get("value")
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+        if parts:
+            return "\n".join(parts).strip()
+    if isinstance(content, dict):
+        for key in ("text", "value"):
+            value = content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def extract_json_object_text(text):
+    value = strip_json_code_fence(text)
+    if not value:
+        return ""
+    start = value.find("{")
+    if start < 0:
+        return value
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(value)):
+        char = value[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return value[start : index + 1]
+    return value[start:]
+
+
 def ae_correction_instructions():
     return (
         "Ты корректируешь одну ячейку контент-плана для After Effects. "
         "Верни только JSON-объект без Markdown. Не добавляй фактов, которых нет в raw_text. "
         "Исправляй только уверенные случаи: тему, короткое описание, формат, людей и должности. "
+        "Тема и описание должны быть короткими. Описание не должно дублировать тему. "
+        "Если описание сводится к повтору темы, верни пустую строку. "
+        "Если в raw_text есть маркер 'главная встреча дня', описание должно быть 'Главная встреча дня'. "
+        "Нумерацию вида '1)'/'2)' не включай ни в тему, ни в должности, ни в имена. "
         "Если сомневаешься, оставь поле пустым и добавь предупреждение. "
-        "Схема: {\"topic\":\"\",\"description\":\"\",\"format\":\"\",\"people\":[{\"name\":\"\",\"role\":\"\",\"position\":\"\"}],\"warnings\":[],\"confidence\":0.0}."
+        "Схема: {\"topic\":\"\",\"description\":\"\",\"format\":\"\",\"people\":[{\"name\":\"\",\"role\":\"\",\"position\":\"\"}],\"warnings\":[],\"confidence\":0.0}. "
+        "Ответ должен быть компактным, одной JSON-структурой, без пояснений до и после."
     )
 
 
@@ -816,27 +909,63 @@ def ae_correction_payload(context):
 def ae_correction_provider_request(provider, context, timeout):
     provider = normalize_space(provider).casefold()
     prompt = json.dumps(ae_correction_payload(context), ensure_ascii=False)
-    messages = [
-        {"role": "system", "content": ae_correction_instructions()},
-        {"role": "user", "content": prompt},
+    attempts = [
+        {
+            "messages": [
+                {"role": "system", "content": ae_correction_instructions()},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 1400,
+        },
+        {
+            "messages": [
+                {"role": "system", "content": ae_correction_instructions()},
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": "{"},
+            ],
+            "temperature": 0,
+            "max_tokens": 1400,
+        },
     ]
-    if provider == "deepseek":
-        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro").strip() or "deepseek-v4-pro"
-        payload = {"model": model, "messages": messages, "temperature": 0.1, "max_tokens": 900, "response_format": {"type": "json_object"}}
-        text = chat_completion_text("DeepSeek", DEEPSEEK_CHAT_COMPLETIONS_URL, os.environ.get("DEEPSEEK_API_KEY", "").strip(), payload, timeout)
-    elif provider == "groq":
-        model = os.environ.get("GROQ_CORRECTION_MODEL", os.environ.get("GROQ_SUMMARY_MODEL", "llama-3.3-70b-versatile")).strip() or "llama-3.3-70b-versatile"
-        payload = {"model": model, "messages": messages, "temperature": 0.1, "max_tokens": 900, "response_format": {"type": "json_object"}}
-        text = chat_completion_text("Groq", GROQ_CHAT_COMPLETIONS_URL, os.environ.get("GROQ_API_KEY", "").strip(), payload, timeout)
-    else:
-        raise ConfigError("Неизвестный AI_CORRECTION_PROVIDER='{}'.".format(provider))
-    try:
-        parsed = json.loads(strip_json_code_fence(text))
-    except ValueError as exc:
-        raise MonitorError("{} вернул невалидный JSON коррекции: {}".format(provider, exc))
-    if not isinstance(parsed, dict):
-        raise MonitorError("{} вернул JSON не объект.".format(provider))
-    return parsed
+    last_error = None
+    for attempt_index, attempt in enumerate(attempts, start=1):
+        if provider == "deepseek":
+            model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro").strip() or "deepseek-v4-pro"
+            payload = {
+                "model": model,
+                "messages": attempt["messages"],
+                "temperature": attempt["temperature"],
+                "max_tokens": attempt["max_tokens"],
+                "response_format": {"type": "json_object"},
+            }
+            text = chat_completion_text("DeepSeek", DEEPSEEK_CHAT_COMPLETIONS_URL, os.environ.get("DEEPSEEK_API_KEY", "").strip(), payload, timeout)
+        elif provider == "groq":
+            model = os.environ.get("GROQ_CORRECTION_MODEL", os.environ.get("GROQ_SUMMARY_MODEL", "llama-3.3-70b-versatile")).strip() or "llama-3.3-70b-versatile"
+            payload = {
+                "model": model,
+                "messages": attempt["messages"],
+                "temperature": attempt["temperature"],
+                "max_tokens": attempt["max_tokens"],
+                "response_format": {"type": "json_object"},
+            }
+            text = chat_completion_text("Groq", GROQ_CHAT_COMPLETIONS_URL, os.environ.get("GROQ_API_KEY", "").strip(), payload, timeout)
+        else:
+            raise ConfigError("Неизвестный AI_CORRECTION_PROVIDER='{}'.".format(provider))
+        try:
+            parsed = json.loads(extract_json_object_text(text))
+        except ValueError as exc:
+            last_error = exc
+            if attempt_index < len(attempts):
+                continue
+            raise MonitorError("{} вернул невалидный JSON коррекции: {}".format(provider, exc))
+        if not isinstance(parsed, dict):
+            last_error = MonitorError("{} вернул JSON не объект.".format(provider))
+            if attempt_index < len(attempts):
+                continue
+            raise last_error
+        return parsed
+    raise MonitorError("{} не смог вернуть корректный JSON: {}".format(provider, last_error))
 
 
 def build_ae_llm_corrector(args):
@@ -1181,6 +1310,7 @@ def recipients_report(sheets, state=None):
     lines.append("Основные получатели: {}".format(", ".join(default_chat_ids()) or "не заданы"))
     if state is not None:
         lines.append("Контент-план через бота: {}".format(", ".join(content_plan_chat_ids(state)) or "не добавлены"))
+        lines.append("Доступ к плашкам: {}".format(", ".join(plaque_chat_ids(state)) or "не добавлены"))
     for sheet in sheets:
         lines.append("{}: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы"))
     return "\n".join(lines)
@@ -1207,6 +1337,58 @@ def content_access_report(state):
         "/remove_content_user 415835819\n\n"
         "Показать список:\n"
         "/content_users\n\n"
+        "Человек должен хотя бы один раз написать боту, иначе Telegram может запретить отправку."
+    ).format(", ".join(chat_ids) or "не добавлены", "\n".join(recent_lines) or "пока нет")
+
+
+def plaque_chat_ids(state):
+    chat_ids = state.setdefault("_plaque_chat_ids", [])
+    if not isinstance(chat_ids, list):
+        state["_plaque_chat_ids"] = []
+    return [str(item).strip() for item in state["_plaque_chat_ids"] if str(item).strip()]
+
+
+def add_plaque_chat_id(state, chat_id):
+    chat_id = str(chat_id).strip()
+    if not chat_id:
+        raise ConfigError("Укажите chat_id.")
+    if not re.fullmatch(r"-?\d+", chat_id):
+        raise ConfigError("chat_id должен состоять только из цифр.")
+    chat_ids = plaque_chat_ids(state)
+    if chat_id not in chat_ids:
+        chat_ids.append(chat_id)
+    state["_plaque_chat_ids"] = chat_ids
+    return chat_id
+
+
+def remove_plaque_chat_id(state, chat_id):
+    chat_id = str(chat_id).strip()
+    chat_ids = plaque_chat_ids(state)
+    state["_plaque_chat_ids"] = [item for item in chat_ids if item != chat_id]
+    return chat_id
+
+
+def plaque_access_report(state):
+    chat_ids = plaque_chat_ids(state)
+    recent_lines = []
+    for chat_id, data in sorted(known_chats(state).items(), key=lambda item: item[1].get("seen_at", ""), reverse=True):
+        if chat_id in admin_chat_ids():
+            continue
+        marker = "доступ есть" if chat_id in chat_ids else "нет доступа"
+        recent_lines.append("{} - {} - {}".format(chat_id, known_chat_label(chat_id, data), marker))
+        if len(recent_lines) >= 10:
+            break
+    return (
+        "Доступ к генерации плашек.\n\n"
+        "Добавленные chat_id: {}\n\n"
+        "Последние пользователи:\n"
+        "{}\n\n"
+        "Добавить:\n"
+        "/add_plaque_user 415835819\n\n"
+        "Удалить:\n"
+        "/remove_plaque_user 415835819\n\n"
+        "Показать список:\n"
+        "/plaque_users\n\n"
         "Человек должен хотя бы один раз написать боту, иначе Telegram может запретить отправку."
     ).format(", ".join(chat_ids) or "не добавлены", "\n".join(recent_lines) or "пока нет")
 
@@ -1244,29 +1426,49 @@ def send_test_to_sheet(args, chat_id, sheet, state=None):
         send_admin_message(args, chat_id, "TS26: ошибка теста", "Таблица: {}\n{}".format(sheet["label"], exc), reply_markup=admin_keyboard())
 
 
-def start_screen_text(is_content_recipient=False):
+def start_screen_text(is_content_recipient=False, can_use_plaque=False):
     lines = [
         "Я бот TS26.",
         "",
         "Что умею:",
         "• присылать уведомления об изменениях в Контент-плане;",
-        "• помочь добавить или обновить плашку для моушена;",
-        "• перед отправкой плашки показать проверку данных.",
-        "",
-        "Чтобы добавить плашку, нажмите кнопку ниже.",
     ]
+    if can_use_plaque:
+        lines.extend(
+            [
+                "• помочь добавить или обновить плашку для моушена;",
+                "• перед отправкой плашки показать проверку данных.",
+                "",
+                "Чтобы добавить плашку, нажмите кнопку ниже.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "• принимать заявки на плашки только от пользователей с выданным доступом.",
+                "",
+                "Если вам нужен доступ к плашкам, напишите администратору.",
+            ]
+        )
     if is_content_recipient:
         lines.extend(["", "Вы добавлены в уведомления Контент-плана."])
     return "\n".join(lines)
 
 
-def send_start_screen(args, chat_id, state=None, is_content_recipient=False):
-    send_plain_chat_message(args, chat_id, "TS26: старт", start_screen_text(is_content_recipient=is_content_recipient), reply_markup=plaque_reply_keyboard())
+def send_start_screen(args, chat_id, state=None, is_content_recipient=False, can_use_plaque=False):
+    reply_markup = plaque_reply_keyboard() if can_use_plaque else None
+    send_plain_chat_message(
+        args,
+        chat_id,
+        "TS26: старт",
+        start_screen_text(is_content_recipient=is_content_recipient, can_use_plaque=can_use_plaque),
+        reply_markup=reply_markup,
+    )
 
 
 def send_plaque_preview(args, chat_id):
     send_admin_message(args, chat_id, "TS26: превью обычного пользователя", "Ниже бот покажет, как форму видит обычный пользователь. Это только превью: Google Sheet не изменится.")
-    send_start_screen(args, chat_id)
+    send_start_screen(args, chat_id, can_use_plaque=True)
     send_plain_chat_message(args, chat_id, "TS26: новая плашка", "Введите имя в формате:\nФамилия Имя")
     send_plain_chat_message(args, chat_id, "TS26: новая плашка", "Введите должность для плашки.")
     preview_state = {"_plaque_sessions": {str(chat_id): {"name": "Иванов Иван", "position": "директор подразделения"}}}
@@ -1324,6 +1526,8 @@ def handle_admin_callback(args, sheets, state, callback):
         send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets, state=state), reply_markup=admin_keyboard())
     elif data == "dbg:content_access":
         send_admin_message(args, chat_id, "TS26: Контент-доступ", content_access_report(state), reply_markup=admin_keyboard())
+    elif data == "dbg:plaque_access":
+        send_admin_message(args, chat_id, "TS26: доступ к плашкам", plaque_access_report(state), reply_markup=admin_keyboard())
     elif data == "dbg:ae_status":
         send_admin_message(args, chat_id, "TS26: AE-ready статус", ae_status_report(state), reply_markup=admin_keyboard())
     elif data == "dbg:ae_sync":
@@ -1344,7 +1548,13 @@ def handle_admin_callback(args, sheets, state, callback):
     elif data == "dbg:preview_plaque":
         send_plaque_preview(args, chat_id)
     elif data == "dbg:start_screen":
-        send_start_screen(args, chat_id, state=state, is_content_recipient=str(chat_id) in content_plan_chat_ids(state))
+        send_start_screen(
+            args,
+            chat_id,
+            state=state,
+            is_content_recipient=str(chat_id) in content_plan_chat_ids(state),
+            can_use_plaque=can_use_plaque_form(sheets, state, chat_id),
+        )
     elif data == "dbg:user_mode":
         send_user_mode_start(args, state, chat_id)
     elif data.startswith("dbg:test:"):
@@ -1388,6 +1598,8 @@ def handle_admin_message(args, sheets, state, message):
         send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets, state=state), reply_markup=admin_keyboard())
     elif command == "/content_users":
         send_admin_message(args, chat_id, "TS26: Контент-доступ", content_access_report(state), reply_markup=admin_keyboard())
+    elif command == "/plaque_users":
+        send_admin_message(args, chat_id, "TS26: доступ к плашкам", plaque_access_report(state), reply_markup=admin_keyboard())
     elif command == "/ae_status":
         send_admin_message(args, chat_id, "TS26: AE-ready статус", ae_status_report(state), reply_markup=admin_keyboard())
     elif command == "/ae_source":
@@ -1432,10 +1644,44 @@ def handle_admin_message(args, sheets, state, message):
                     send_telegram_to_chat_ids(args, [target_chat_id], "TS26: доступ к Контент-плану", "Вы добавлены в уведомления Контент-плана. Уведомления по Плану записи приходить не будут.", subtitle="Контент-план")
                 except (MonitorError, ConfigError) as exc:
                     send_admin_message(args, chat_id, "TS26: ошибка теста", "chat_id добавлен, но тестовое сообщение не отправилось:\n{}".format(exc), reply_markup=admin_keyboard())
+    elif command in {"/add_plaque_user", "/remove_plaque_user"}:
+        parts = text.split()
+        if len(parts) < 2:
+            send_admin_message(args, chat_id, "TS26: доступ к плашкам", "Укажите chat_id.\nНапример:\n{} 415835819".format(command), reply_markup=admin_keyboard())
+            return True
+        try:
+            target_chat_id = add_plaque_chat_id(state, parts[1]) if command == "/add_plaque_user" else remove_plaque_chat_id(state, parts[1])
+        except ConfigError as exc:
+            send_admin_message(args, chat_id, "TS26: ошибка", str(exc), reply_markup=admin_keyboard())
+            return True
+        action_text = "добавлен" if command == "/add_plaque_user" else "удален"
+        send_admin_message(
+            args,
+            chat_id,
+            "TS26: доступ к плашкам",
+            "chat_id {} {} для генерации плашек.\n\n{}".format(target_chat_id, action_text, plaque_access_report(state)),
+            reply_markup=admin_keyboard(),
+        )
+        if command == "/add_plaque_user":
+            try:
+                send_plain_chat_message(
+                    args,
+                    target_chat_id,
+                    "TS26: доступ к плашкам",
+                    "Вам открыт доступ к генерации плашек. Нажмите /start, чтобы увидеть форму.",
+                )
+            except (MonitorError, ConfigError) as exc:
+                send_admin_message(args, chat_id, "TS26: ошибка теста", "chat_id добавлен, но сообщение не отправилось:\n{}".format(exc), reply_markup=admin_keyboard())
     elif command == "/preview_user":
         send_plaque_preview(args, chat_id)
     elif command == "/start_screen":
-        send_start_screen(args, chat_id, state=state, is_content_recipient=str(chat_id) in content_plan_chat_ids(state))
+        send_start_screen(
+            args,
+            chat_id,
+            state=state,
+            is_content_recipient=str(chat_id) in content_plan_chat_ids(state),
+            can_use_plaque=can_use_plaque_form(sheets, state, chat_id),
+        )
     elif command in {"/user", "/user_mode", "/plaque_mode"}:
         send_user_mode_start(args, state, chat_id)
     elif command == "/google_access":
@@ -1494,9 +1740,11 @@ def set_user_mode_chat(state, chat_id, enabled):
 
 
 def can_use_plaque_form(sheets, state, chat_id):
+    if is_admin_chat_id(chat_id):
+        return True
     if is_user_mode_chat(state, chat_id):
         return True
-    return not (is_admin_chat_id(chat_id) or str(chat_id) in known_service_chat_ids(sheets, state=state))
+    return str(chat_id).strip() in plaque_chat_ids(state)
 
 
 def normalize_person_name(value):
@@ -1596,7 +1844,7 @@ def send_plaque_confirmation(args, state, chat_id):
     send_plain_chat_message(args, chat_id, "TS26: проверьте плашку", message, reply_markup=keyboard)
 
 
-def get_google_client():
+def get_google_client(include_drive=False):
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
     oauth_user_json = os.environ.get("GOOGLE_OAUTH_USER_JSON", "").strip()
@@ -1609,7 +1857,9 @@ def get_google_client():
         from google.oauth2.service_account import Credentials
     except ImportError as exc:
         raise ConfigError("Не установлены зависимости для Google Sheets. Проверьте requirements.txt на хостинге: {}".format(exc))
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.file"]
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    if include_drive:
+        scopes.append("https://www.googleapis.com/auth/drive.file")
     if oauth_user_json:
         try:
             info = json.loads(oauth_user_json)
@@ -1631,6 +1881,14 @@ def get_google_client():
 
 def describe_google_error(exc):
     text = str(exc)
+    if "invalid_scope" in text:
+        return (
+            "OAuth-токен Google был выдан без нужного scope для этой операции.\n"
+            "Для обычной записи в существующую таблицу достаточно текущего токена, "
+            "но для авто-создания AE-ready таблицы нужно заново получить GOOGLE_OAUTH_USER_JSON "
+            "со scope spreadsheets + drive.file, либо заранее задать AE_READY_SPREADSHEET_ID.\n"
+            "{}".format(text[:500])
+        )
     if "sheets.googleapis.com" in text and ("disabled" in text or "has not been used" in text):
         project_match = re.search(r"project=(\d+)", text)
         project_id = project_match.group(1) if project_match else "ВАШ_PROJECT_ID"
@@ -1716,7 +1974,8 @@ def get_or_create_ae_spreadsheet(client, state, rebuild=False):
     spreadsheet_id = "" if rebuild else ae_ready_spreadsheet_id(state)
     if spreadsheet_id:
         return run_google_action("Не удалось открыть AE-ready таблицу", lambda: client.open_by_key(spreadsheet_id))
-    spreadsheet = run_google_action("Не удалось создать AE-ready таблицу", lambda: client.create(AE_READY_SPREADSHEET_TITLE))
+    drive_client = get_google_client(include_drive=True)
+    spreadsheet = run_google_action("Не удалось создать AE-ready таблицу", lambda: drive_client.create(AE_READY_SPREADSHEET_TITLE))
     spreadsheet_id = getattr(spreadsheet, "id", "") or getattr(spreadsheet, "spreadsheet_id", "")
     if not spreadsheet_id:
         raise ConfigError("Google создал таблицу, но не вернул spreadsheet_id.")
@@ -1754,6 +2013,49 @@ def write_ae_records_to_spreadsheet(spreadsheet, records):
             run_google_action("Не удалось записать лист {}".format(title), lambda worksheet=worksheet, values=values: worksheet.update(values, value_input_option="USER_ENTERED"))
 
 
+def session_shift_by_day():
+    config_path = Path(os.environ.get("AE_RENDER_CONFIG", Path(__file__).resolve().parent / "ae_render_config.json")).expanduser()
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        return config.get("templates", {}).get("session_topic", {}).get("shift_by_day", {})
+    except (OSError, ValueError) as exc:
+        log("Не удалось прочитать карту смен для рендера тем: {}".format(exc))
+        return {}
+
+
+def session_day_number(value):
+    match = re.search(r"\d+", str(value or ""))
+    return match.group(0) if match else ""
+
+
+def enqueue_session_topic_renders(records):
+    if not AE_RENDER_ENABLED:
+        return 0
+    shifts = session_shift_by_day()
+    queued = 0
+    for session in records.get("legacy_sessions") or []:
+        day = session_day_number(session.get("ДЕНЬ"))
+        shift = str(shifts.get(day, "")).strip()
+        topic = str(session.get("ТЕМА", "")).strip()
+        description = str(session.get("ОПИСАНИЕ", "")).strip()
+        if not day or not shift or not topic or not description:
+            continue
+        source_key = "session:{}:{}:{}:{}".format(day, shift, session.get("ПЛОЩАДКА", ""), session.get("ИСХОДНАЯ_ЯЧЕЙКА", ""))
+        try:
+            _, created = ae_render_queue.enqueue(
+                AE_RENDER_QUEUE_PATH,
+                "session_topic",
+                {"day": day, "shift": shift, "topic": topic, "description": description, "venue": session.get("ПЛОЩАДКА", "")},
+                source_key=source_key,
+            )
+        except (OSError, ae_render_queue.RenderQueueError) as exc:
+            log("Не удалось поставить тему сессии в очередь: {}".format(exc))
+            continue
+        if created:
+            queued += 1
+    return queued
+
+
 def run_ae_ready_sync(args, state, force=False, rebuild=False):
     source_url = ae_ready_source_url(state)
     source_sheet = {"label": "Контент-план", "url": source_url}
@@ -1764,9 +2066,10 @@ def run_ae_ready_sync(args, state, force=False, rebuild=False):
     corrector = build_ae_llm_corrector(args)
     records = ae_content_plan.build_records(current["cells"], corrector=corrector, confidence_threshold=AE_READY_CONFIDENCE_THRESHOLD)
     data_hash = ae_content_plan.records_hash(records)
-    client = get_google_client()
+    client = get_google_client(include_drive=False)
     spreadsheet = get_or_create_ae_spreadsheet(client, state, rebuild=rebuild)
     write_ae_records_to_spreadsheet(spreadsheet, records)
+    queued_session_topics = enqueue_session_topic_renders(records)
     spreadsheet_id = getattr(spreadsheet, "id", "") or ae_ready_spreadsheet_id(state)
     report = records.get("report") or {}
     data.update({
@@ -1785,8 +2088,8 @@ def run_ae_ready_sync(args, state, force=False, rebuild=False):
     return {
         "changed": True,
         "spreadsheet_id": spreadsheet_id,
-        "message": "AE-ready обновлена: сессий {}, людей {}, плашек {}, визиток {}, warnings {}.".format(
-            data["sessions"], data["unique_people"], data["badges"], data["cards"], data["warnings_count"]
+        "message": "AE-ready обновлена: сессий {}, людей {}, плашек {}, визиток {}, warnings {}, тем поставлено в рендер {}.".format(
+            data["sessions"], data["unique_people"], data["badges"], data["cards"], data["warnings_count"], queued_session_topics
         ),
     }
 
@@ -1915,6 +2218,34 @@ def write_plaque_to_sheet(name, position):
     }
 
 
+def enqueue_plaque_render(name, position, result):
+    if not AE_RENDER_ENABLED:
+        return {"status": "disabled"}
+    source_key = "plaque:{}:{}".format(result["worksheet_gid"], result["row"])
+    try:
+        job, created = ae_render_queue.enqueue(
+            AE_RENDER_QUEUE_PATH,
+            "plaque",
+            {"name": name, "position": position, "sheet_row": result["row"]},
+            source_key=source_key,
+        )
+        return {"status": "queued" if created else "existing", "job": job}
+    except (OSError, ae_render_queue.RenderQueueError) as exc:
+        log("Не удалось поставить плашку в очередь: {}".format(exc))
+        return {"status": "error", "error": str(exc)}
+
+
+def plaque_render_message(render):
+    status = render.get("status") if isinstance(render, dict) else "error"
+    if status == "queued":
+        return "Рендер поставлен в очередь."
+    if status == "existing":
+        return "Рендер уже был в очереди."
+    if status == "disabled":
+        return "Автоматический рендер отключен."
+    return "Плашка сохранена, но рендер не поставлен в очередь."
+
+
 def confirm_plaque(args, state, chat_id):
     session = plaque_session(state, chat_id)
     entries = session.get("entries")
@@ -1922,7 +2253,8 @@ def confirm_plaque(args, state, chat_id):
         results = []
         for entry in entries:
             result = write_plaque_to_sheet(entry["name"], entry["position"])
-            results.append({"entry": entry, "result": result})
+            render = enqueue_plaque_render(entry["name"], entry["position"], result)
+            results.append({"entry": entry, "result": result, "render": render})
         clear_plaque_session(state, chat_id)
         created_count = sum(1 for item in results if item["result"]["action"] == "created")
         updated_count = sum(1 for item in results if item["result"]["action"] == "updated")
@@ -1934,7 +2266,8 @@ def confirm_plaque(args, state, chat_id):
         for index, item in enumerate(results, start=1):
             action_text = "обновлена" if item["result"]["action"] == "updated" else "добавлена"
             entry = item["entry"]
-            public_lines.append("{}. {}: {} — {}".format(index, action_text.capitalize(), entry["name"], entry["position"]))
+            render_text = " " + plaque_render_message(item.get("render", {}))
+            public_lines.append("{}. {}: {} — {}.{}".format(index, action_text.capitalize(), entry["name"], entry["position"], render_text))
         admin_lines = [
             "Пакетная отправка плашек.",
             "Добавлено: {}. Обновлено: {}.".format(created_count, updated_count),
@@ -1969,9 +2302,11 @@ def confirm_plaque(args, state, chat_id):
         ask_plaque_name(args, state, chat_id)
         return
     result = write_plaque_to_sheet(name, position)
+    render = enqueue_plaque_render(name, position, result)
     clear_plaque_session(state, chat_id)
     action_text = "обновлена" if result["action"] == "updated" else "добавлена"
-    public_message = "Плашка {}.\nФИО: {}\nДолжность: {}".format(action_text, name, position)
+    render_message = plaque_render_message(render)
+    public_message = "Плашка {}.\nФИО: {}\nДолжность: {}\n{}".format(action_text, name, position, render_message)
     admin_message = "Плашка {}.\nЛист: {} (gid={})\nСтрока: {}\nФИО: {}\nДолжность: {}\n{}".format(
         action_text,
         result["worksheet_title"],
@@ -2042,14 +2377,21 @@ def handle_plaque_message(args, sheets, state, message):
     text = normalize_space(raw_text)
     if not chat_id or not text:
         return False
-    if not can_use_plaque_form(sheets, state, chat_id):
-        return False
-    session = plaque_sessions(state).get(str(chat_id), {})
     command = text.split()[0].split("@", 1)[0].lower() if text.startswith("/") else ""
     if command == "/start":
         clear_plaque_session(state, chat_id)
-        send_start_screen(args, chat_id, state=state, is_content_recipient=str(chat_id) in content_plan_chat_ids(state))
+        allowed = can_use_plaque_form(sheets, state, chat_id)
+        send_start_screen(
+            args,
+            chat_id,
+            state=state,
+            is_content_recipient=str(chat_id) in content_plan_chat_ids(state),
+            can_use_plaque=allowed,
+        )
         return True
+    if not can_use_plaque_form(sheets, state, chat_id):
+        return False
+    session = plaque_sessions(state).get(str(chat_id), {})
     if command in {"/add", "/plaque"} or text.casefold() == PLAQUE_ADD_BUTTON_TEXT.casefold():
         clear_plaque_session(state, chat_id)
         send_plaque_start(args, chat_id, state=state)
