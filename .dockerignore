@@ -1,0 +1,14 @@
+.git
+.env
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.log
+*.err.log
+.DS_Store
+data/
+state/
+client_secret*.json
+oauth_client.json
+google_oauth_user.json
