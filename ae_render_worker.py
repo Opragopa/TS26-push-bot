@@ -18,8 +18,9 @@ import ae_sheet_source
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = SCRIPT_DIR / "ae_render_config.json"
-PREPARE_SCRIPT = SCRIPT_DIR / "ae_prepare_project.jsx"
-OPEN_QUEUE_RENDER_SCRIPT = SCRIPT_DIR / "ae_render_open_queue.jsx"
+AE_TEMPLATE_DIR = SCRIPT_DIR / "ae_templates"
+PREPARE_SCRIPT = AE_TEMPLATE_DIR / "ae_prepare_project.jsx.template"
+OPEN_QUEUE_RENDER_SCRIPT = AE_TEMPLATE_DIR / "ae_render_open_queue.jsx.template"
 APPLE_SCRIPT = SCRIPT_DIR / "ae_run_script.applescript"
 
 

@@ -257,7 +257,7 @@ python3 tg_sheet_monitor.py --once --no-telegram
 ## Запуск на Bothost
 
 В Bothost можно запускать прямо из GitHub-репозитория.
-В репозитории есть `Dockerfile`, поэтому Bothost должен собирать контейнер по нему и запускать именно `python main.py`. Это важно: `.jsx` файлы в проекте являются шаблонами для After Effects и не должны быть entrypoint бота.
+В репозитории есть `Dockerfile`, поэтому Bothost должен собирать контейнер по нему и запускать именно `python main.py`. AE-скрипты хранятся как шаблоны в `ae_templates/*.jsx.template`. Файлы `ae_prepare_project.jsx` и `ae_render_open_queue.jsx` в корне оставлены только как совместимые Node-лаунчеры: если хостинг по старой настройке запустит один из них, он передаст запуск в `python main.py`.
 
 1. Создайте или откройте бота в панели Bothost.
 2. Укажите репозиторий:

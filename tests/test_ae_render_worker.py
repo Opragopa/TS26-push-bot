@@ -86,6 +86,19 @@ class RenderWorkerPayloadTests(unittest.TestCase):
         script = ae_render_worker.OPEN_QUEUE_RENDER_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("app.project.renderQueue.render()", script)
 
+    def test_root_jsx_files_are_host_launchers(self):
+        for script_name in ("ae_prepare_project.jsx", "ae_render_open_queue.jsx"):
+            script = (ROOT / script_name).read_text(encoding="utf-8")
+            self.assertIn("python", script)
+            self.assertIn("main.py", script)
+            self.assertNotIn("__PARAMS_PATH__", script)
+            self.assertNotIn("app.project", script)
+
+    def test_ae_scripts_live_as_templates(self):
+        self.assertEqual(".template", ae_render_worker.PREPARE_SCRIPT.suffix)
+        self.assertEqual(".template", ae_render_worker.OPEN_QUEUE_RENDER_SCRIPT.suffix)
+        self.assertIn("__PARAMS_PATH__", ae_render_worker.PREPARE_SCRIPT.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
