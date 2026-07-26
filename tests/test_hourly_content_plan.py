@@ -107,9 +107,11 @@ class HourlyContentPlanTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertEqual(state[monitor.CONTENT_PLAN_DIGEST_STATE_KEY]["events"], [])
-        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(sent[0][1], "TS26: AI-сводка за час")
+        self.assertEqual(sent[1][1], "TS26: полный diff за час")
         self.assertIn("Добавлено открытие.", sent[0][2])
-        self.assertIn("Полный diff", sent[0][2])
+        self.assertIn("Полный diff", sent[1][2])
 
     def test_content_plan_recipients_are_admins_and_selected_users(self):
         state = {"_content_plan_chat_ids": ["333"]}
@@ -155,8 +157,38 @@ class HourlyContentPlanTests(unittest.TestCase):
             else:
                 os.environ["TELEGRAM_CHAT_ID"] = old_chat_id
 
+        self.assertEqual(len(messages), 2)
         self.assertIn("AI-сводка недоступна", messages[0])
-        self.assertIn(original_diff, messages[0])
+        self.assertIn(original_diff, messages[1])
+
+    def test_summary_send_failure_does_not_block_full_diff(self):
+        state = {}
+        original_diff = "Контент-план: строка «10:00», колонка «Зал» - было «пусто», стало «Открытие»."
+        monitor.queue_content_plan_change(state, original_diff)
+        state[monitor.CONTENT_PLAN_DIGEST_STATE_KEY]["last_flush_hour"] = "2026-07-22T14"
+        moment = dt.datetime(2026, 7, 22, 15, 0, tzinfo=monitor.CONTENT_PLAN_TIME_ZONE)
+        sent = []
+
+        def fake_send(_args, _chat_ids, title, message, subtitle="", url=""):
+            if "AI-сводка" in title:
+                raise monitor.MonitorError("summary failed")
+            sent.append((title, message))
+            return 1
+
+        old_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        os.environ["TELEGRAM_CHAT_ID"] = "123"
+        try:
+            with mock.patch.object(monitor, "build_ai_content_plan_summary", return_value="Добавлено открытие."), mock.patch.object(monitor, "send_telegram_chunks_to_chat_ids", side_effect=fake_send):
+                changed = monitor.flush_content_plan_digest(self.args, [self.sheet], state, moment=moment)
+        finally:
+            if old_chat_id is None:
+                os.environ.pop("TELEGRAM_CHAT_ID", None)
+            else:
+                os.environ["TELEGRAM_CHAT_ID"] = old_chat_id
+
+        self.assertTrue(changed)
+        self.assertEqual(state[monitor.CONTENT_PLAN_DIGEST_STATE_KEY]["events"], [])
+        self.assertEqual(sent, [("TS26: полный diff за час", "Полный diff\n{}".format(original_diff))])
 
     def test_groq_provider_uses_llama_default_model(self):
         captured = []

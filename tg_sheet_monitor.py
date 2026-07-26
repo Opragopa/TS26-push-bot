@@ -1032,22 +1032,37 @@ def flush_content_plan_digest(args, sheets, state, moment=None):
     full_diff = "\n".join(diffs)
     event_count = len(events)
     change_count = sum(int(event.get("change_count") or 0) for event in events)
+    ai_summary = ""
+    summary_error = ""
     try:
         ai_summary = build_ai_content_plan_summary(full_diff, args.timeout)
-        summary_block = "{}\n{}".format("Коротко за час", ai_summary)
         log("AI-сводка Контент-плана готова: событий {}, строк diff {}.".format(event_count, change_count))
     except (MonitorError, ConfigError) as exc:
-        summary_block = "{}\nAI-сводка недоступна, ниже полный diff.".format("Коротко за час")
+        summary_error = str(exc)
         log("AI-сводка Контент-плана не получена: {}".format(exc))
 
-    message = "{}\n{}\n{}\n\nПолный diff\n{}".format(TELEGRAM_QUOTE_START, summary_block, TELEGRAM_QUOTE_END, full_diff)
+    chat_ids = recipient_chat_ids(content_sheet, state=state)
+    chunks = 0
+    summary_body = "{}\nКоротко за час\n{}\n{}".format(TELEGRAM_QUOTE_START, ai_summary, TELEGRAM_QUOTE_END) if ai_summary else "AI-сводка недоступна.\nПолный diff отправляется отдельным сообщением."
     try:
-        send_macos_notification(args, "TS26: обновления за час", summary_block, subtitle=content_sheet["label"])
-        chunks = send_telegram_chunks_to_chat_ids(
+        send_macos_notification(args, "TS26: обновления за час", ai_summary or summary_error or "Полный diff отправляется отдельным сообщением.", subtitle=content_sheet["label"])
+        chunks += send_telegram_chunks_to_chat_ids(
             args,
-            recipient_chat_ids(content_sheet, state=state),
-            "TS26: обновления за час",
-            message,
+            chat_ids,
+            "TS26: AI-сводка за час" if ai_summary else "TS26: AI-сводка недоступна",
+            summary_body,
+            subtitle=content_sheet["label"],
+        )
+    except (MonitorError, ConfigError) as exc:
+        log("Не удалось отправить AI-сводку Контент-плана, diff все равно будет отправлен: {}".format(exc))
+
+    diff_message = "Полный diff\n{}".format(full_diff)
+    try:
+        chunks += send_telegram_chunks_to_chat_ids(
+            args,
+            chat_ids,
+            "TS26: полный diff за час",
+            diff_message,
             subtitle=content_sheet["label"],
             url=content_sheet["url"],
         )
