@@ -84,6 +84,30 @@ DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
 TELEGRAM_QUOTE_START = "::quote"
 TELEGRAM_QUOTE_END = "::endquote"
 TELEGRAM_PARSE_MODE = "HTML"
+DEFAULT_BOT_COMMANDS = [
+    {"command": "start", "description": "Открыть бот"},
+]
+ADMIN_BOT_COMMANDS = [
+    {"command": "start", "description": "Админ-панель"},
+    {"command": "admin", "description": "Админ-панель"},
+    {"command": "debug", "description": "Админ-панель"},
+    {"command": "add", "description": "Добавить плашку"},
+    {"command": "status", "description": "Статус монитора"},
+    {"command": "recipients", "description": "Получатели"},
+    {"command": "content_users", "description": "Доступ к Контент-плану"},
+    {"command": "plaque_users", "description": "Доступ к плашкам"},
+    {"command": "ae_sync", "description": "Обновить AE-ready"},
+    {"command": "ae_status", "description": "Статус AE-ready"},
+    {"command": "ae_link", "description": "Ссылка AE-ready"},
+    {"command": "ae_warnings", "description": "Warnings AE-ready"},
+    {"command": "ae_source", "description": "Источник Контент-плана"},
+    {"command": "ae_rebuild", "description": "Пересоздать AE-ready"},
+    {"command": "google_access", "description": "Проверить Google-доступ"},
+    {"command": "test_content", "description": "Тест Контент-план"},
+    {"command": "test_recording", "description": "Тест План записи"},
+    {"command": "preview_user", "description": "Превью пользователя"},
+    {"command": "user_mode", "description": "Режим пользователя"},
+]
 AE_READY_STATE_KEY = "_ae_ready_content_plan"
 AE_READY_SOURCE_URL = os.environ.get("AE_READY_SOURCE_URL", "https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400")
 AE_POSITION_REFERENCE_URL = os.environ.get(
@@ -377,6 +401,27 @@ def get_required_telegram_token():
     if not token:
         raise ConfigError("Заполните TELEGRAM_BOT_TOKEN в .env или окружении.")
     return token
+
+
+def set_bot_commands_for_scope(args, token, commands, scope):
+    payload = {
+        "commands": json.dumps(commands, ensure_ascii=False),
+        "scope": json.dumps(scope, ensure_ascii=False),
+    }
+    telegram_request(token, "setMyCommands", payload, args.timeout)
+
+
+def configure_bot_commands(args):
+    if args.no_telegram:
+        return
+    token = get_required_telegram_token()
+    try:
+        set_bot_commands_for_scope(args, token, DEFAULT_BOT_COMMANDS, {"type": "default"})
+        for chat_id in admin_chat_ids():
+            set_bot_commands_for_scope(args, token, ADMIN_BOT_COMMANDS, {"type": "chat", "chat_id": chat_id})
+        log("Telegram-команды обновлены: default=start, admins={}".format(", ".join(admin_chat_ids()) or "нет"))
+    except (MonitorError, ConfigError) as exc:
+        log("Не удалось обновить меню Telegram-команд: {}".format(exc))
 
 
 def print_chat_ids(args):
@@ -2934,7 +2979,7 @@ def handle_plaque_message(args, sheets, state, message):
     if not chat_id or not text:
         return False
     command = text.split()[0].split("@", 1)[0].lower() if text.startswith("/") else ""
-    if command in {"/start", "/help"} or text.casefold() == HELP_BUTTON_TEXT.casefold():
+    if command == "/start" or text.casefold() == HELP_BUTTON_TEXT.casefold():
         clear_plaque_session(state, chat_id)
         allowed = can_use_plaque_form(sheets, state, chat_id)
         send_start_screen(
@@ -2945,17 +2990,18 @@ def handle_plaque_message(args, sheets, state, message):
             can_use_plaque=allowed,
         )
         return True
+    if command:
+        if can_use_plaque_form(sheets, state, chat_id):
+            send_plain_chat_message(args, chat_id, "TS26: команда не нужна", "Используйте кнопки внизу чата. Для начала нажмите «Добавить плашку».", reply_markup=plaque_reply_keyboard())
+            return True
+        return False
     if not can_use_plaque_form(sheets, state, chat_id):
         return False
     session = plaque_sessions(state).get(str(chat_id), {})
-    if command in {"/add", "/plaque"} or text.casefold() == PLAQUE_ADD_BUTTON_TEXT.casefold():
+    if text.casefold() == PLAQUE_ADD_BUTTON_TEXT.casefold():
         clear_plaque_session(state, chat_id)
         send_plaque_start(args, chat_id, state=state)
         ask_plaque_name(args, state, chat_id)
-        return True
-    if command == "/cancel":
-        clear_plaque_session(state, chat_id)
-        send_plain_chat_message(args, chat_id, "TS26: отменено", "Плашка не отправлена в таблицу.", reply_markup=plaque_reply_keyboard())
         return True
     step = session.get("step")
     if step == "name":
@@ -3342,6 +3388,7 @@ def main(argv=None):
     log("Основные Telegram chat_id: {}".format(", ".join(default_chat_ids()) or "не заданы"))
     for sheet in sheets:
         log("Получатели для {}: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы"))
+    configure_bot_commands(args)
     if args.startup_message:
         send_startup_message(args, sheets, state=state)
     if poll_admin_updates(args, sheets, state):

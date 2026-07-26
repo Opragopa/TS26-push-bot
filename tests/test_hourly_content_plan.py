@@ -410,6 +410,47 @@ class HourlyContentPlanTests(unittest.TestCase):
         buttons = [button["text"] for row in sent[0][3]["inline_keyboard"] for button in row]
         self.assertIn("Назад", buttons)
 
+    def test_configure_bot_commands_sets_default_and_admin_scopes(self):
+        calls = []
+        old_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        old_admin_ids = os.environ.get("TELEGRAM_ADMIN_CHAT_IDS")
+        os.environ["TELEGRAM_BOT_TOKEN"] = "token"
+        os.environ["TELEGRAM_ADMIN_CHAT_IDS"] = "999"
+        try:
+            with mock.patch.object(monitor, "telegram_request", side_effect=lambda token, method, payload, timeout: calls.append((method, payload)) or {"ok": True}):
+                monitor.configure_bot_commands(self.args)
+        finally:
+            if old_token is None:
+                os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+            else:
+                os.environ["TELEGRAM_BOT_TOKEN"] = old_token
+            if old_admin_ids is None:
+                os.environ.pop("TELEGRAM_ADMIN_CHAT_IDS", None)
+            else:
+                os.environ["TELEGRAM_ADMIN_CHAT_IDS"] = old_admin_ids
+
+        self.assertEqual([item[0] for item in calls], ["setMyCommands", "setMyCommands"])
+        default_commands = monitor.json.loads(calls[0][1]["commands"])
+        admin_commands = monitor.json.loads(calls[1][1]["commands"])
+        self.assertEqual(default_commands, [{"command": "start", "description": "Открыть бот"}])
+        self.assertIn({"command": "ae_sync", "description": "Обновить AE-ready"}, admin_commands)
+        self.assertEqual(monitor.json.loads(calls[1][1]["scope"]), {"type": "chat", "chat_id": "999"})
+
+    def test_non_admin_slash_add_is_not_a_user_command(self):
+        sent = []
+        state = {"_plaque_chat_ids": ["555"]}
+        message = {"chat": {"id": "555"}, "text": "/add"}
+
+        def fake_send(_args, chat_id, title, message, reply_markup=None):
+            sent.append((chat_id, title, message, reply_markup))
+
+        with mock.patch.object(monitor, "send_plain_chat_message", side_effect=fake_send):
+            handled = monitor.handle_plaque_message(self.args, [self.sheet], state, message)
+
+        self.assertTrue(handled)
+        self.assertEqual(sent[0][1], "TS26: команда не нужна")
+        self.assertNotIn("_plaque_sessions", state)
+
     def test_plaque_access_report_marks_added_users(self):
         state = {
             "_plaque_chat_ids": ["555"],
