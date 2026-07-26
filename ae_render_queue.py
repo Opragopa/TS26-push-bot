@@ -13,6 +13,7 @@ from pathlib import Path
 
 
 QUEUE_VERSION = 1
+DEFAULT_LEASE_SECONDS = 4 * 60 * 60
 
 
 class RenderQueueError(Exception):
@@ -25,6 +26,17 @@ def default_queue_path():
 
 def now_text():
     return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+def expires_at(seconds):
+    return (_dt.datetime.now() + _dt.timedelta(seconds=max(1, int(seconds)))).isoformat(timespec="seconds")
+
+
+def is_expired(value):
+    try:
+        return _dt.datetime.fromisoformat(str(value or "")) <= _dt.datetime.now()
+    except ValueError:
+        return True
 
 
 def load_queue_unlocked(queue_path):
@@ -99,17 +111,43 @@ def enqueue(queue_path, kind, payload, source_key=""):
         lock_stream.close()
 
 
-def claim_next(queue_path):
+def claim_next(queue_path, lease_seconds=DEFAULT_LEASE_SECONDS):
     queue_path, lock_stream = locked_queue(queue_path)
     try:
         data = load_queue_unlocked(queue_path)
         for job in data["jobs"]:
             if job.get("status") == "queued":
                 job["status"] = "preparing"
+                job["attempt_count"] = int(job.get("attempt_count") or 0) + 1
+                job["lease_expires_at"] = expires_at(lease_seconds)
                 job["updated_at"] = now_text()
                 save_queue_unlocked(queue_path, data)
                 return dict(job)
         return None
+    finally:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+        lock_stream.close()
+
+
+def recover_expired_jobs(queue_path):
+    """Return jobs abandoned by a stopped worker to the queue."""
+    queue_path, lock_stream = locked_queue(queue_path)
+    try:
+        data = load_queue_unlocked(queue_path)
+        recovered = []
+        for job in data["jobs"]:
+            if job.get("status") not in {"preparing", "rendering"}:
+                continue
+            if not is_expired(job.get("lease_expires_at") or job.get("updated_at")):
+                continue
+            job["status"] = "queued"
+            job["lease_expires_at"] = ""
+            job["recovery_note"] = "Возвращено в очередь после истечения lease."
+            job["updated_at"] = now_text()
+            recovered.append(dict(job))
+        if recovered:
+            save_queue_unlocked(queue_path, data)
+        return recovered
     finally:
         fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
         lock_stream.close()

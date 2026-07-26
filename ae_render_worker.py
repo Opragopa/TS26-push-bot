@@ -62,6 +62,7 @@ def load_config(path):
     data.setdefault("env_file", str(config_path.parent / ".env"))
     data.setdefault("respect_existing_render", True)
     data.setdefault("busy_check_timeout_seconds", 5)
+    data.setdefault("job_lease_seconds", 4 * 60 * 60)
     return data
 
 
@@ -366,7 +367,7 @@ def process_job(config, job):
 
 
 def run_once(config):
-    job = ae_render_queue.claim_next(config["queue_path"])
+    job = ae_render_queue.claim_next(config["queue_path"], config.get("job_lease_seconds", ae_render_queue.DEFAULT_LEASE_SECONDS))
     if not job:
         return False
     try:
@@ -425,6 +426,9 @@ def main(argv=None):
     parser.add_argument("--sync-dry-run", action="store_true", help="Показать, какие плашки были бы архивированы при исчезновении из таблицы.")
     args = parser.parse_args(argv)
     config = load_config(args.config)
+    recovered = ae_render_queue.recover_expired_jobs(config["queue_path"])
+    if recovered:
+        print("В очередь возвращено зависших заданий: {}.".format(len(recovered)), flush=True)
     if args.sync_dry_run:
         config["sync_dry_run"] = True
     while True:

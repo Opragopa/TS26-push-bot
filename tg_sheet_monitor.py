@@ -4,6 +4,7 @@
 
 import argparse
 import csv
+import fcntl
 import datetime as _dt
 import hashlib
 import html
@@ -59,7 +60,7 @@ def load_time_zone(name, fallback_offset_hours):
 
 
 APP_NAME = "tg-pushes-TS26"
-APP_VERSION = "2026-07-23.04"
+APP_VERSION = os.environ.get("TS26_APP_VERSION", "2026-07-26.01")
 DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.get("DATA_DIR") or "data").expanduser()
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
@@ -304,6 +305,19 @@ def save_state(path, state):
     with open(tmp_path, "w", encoding="utf-8") as handle:
         json.dump(state, handle, ensure_ascii=False, indent=2, sort_keys=True)
     os.replace(str(tmp_path), str(path))
+
+
+def acquire_state_lock(path):
+    """Allow exactly one monitor to mutate a state file at a time."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    stream = lock_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        stream.close()
+        raise ConfigError("Монитор уже запущен для файла состояния: {}".format(path))
+    return stream
 
 
 def parse_sheet_arg(value):
@@ -2579,13 +2593,15 @@ def write_plaque_to_sheet(name, position, note_text=PLAQUE_NOTE_TEXT):
 def enqueue_plaque_render(name, position, result):
     if not AE_RENDER_ENABLED:
         return {"status": "disabled"}
+    content_key = hashlib.sha256("{}\x1f{}".format(name, position).encode("utf-8")).hexdigest()[:16]
+    source_key = "plaque:{}:{}:{}".format(result["worksheet_gid"], result["row"], content_key)
     if AE_RENDER_TRIGGER_URL:
         payload = {
             "kind": "plaque",
             "name": name,
             "position": position,
             "sheet_row": result["row"],
-            "source_key": "plaque:{}:{}".format(result["worksheet_gid"], result["row"]),
+            "source_key": source_key,
         }
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
@@ -2613,7 +2629,6 @@ def enqueue_plaque_render(name, position, result):
         except Exception as exc:
             log("Не удалось вызвать AE render trigger: {}".format(exc))
             return {"status": "error", "error": str(exc)}
-    source_key = "plaque:{}:{}".format(result["worksheet_gid"], result["row"])
     try:
         job, created = ae_render_queue.enqueue(
             AE_RENDER_QUEUE_PATH,
@@ -3220,11 +3235,13 @@ def main(argv=None):
     if not sheets:
         raise SystemExit("Добавьте хотя бы одну таблицу в sheets.json или через --sheet.")
     state_path = Path(args.state).expanduser()
+    state_lock = acquire_state_lock(state_path)
     state = load_state(state_path)
 
     started_at = time.monotonic()
     duration_text = ", длительность {} сек.".format(args.duration) if args.duration else ""
     log("Старт монитора v{}: {} таблиц, интервал {} сек.{}".format(APP_VERSION, len(sheets), args.interval, duration_text))
+    log("Runtime: Python {}, pid {}.".format(sys.version.split()[0], os.getpid()))
     log("Файл состояния: {}".format(state_path))
     log("Основные Telegram chat_id: {}".format(", ".join(default_chat_ids()) or "не заданы"))
     for sheet in sheets:

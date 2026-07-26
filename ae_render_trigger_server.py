@@ -155,6 +155,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     config = ae_render_worker.load_config(args.config)
+    recovered = ae_render_queue.recover_expired_jobs(config["queue_path"])
+    if recovered:
+        print("[trigger] recovered expired jobs: {}".format(len(recovered)), flush=True)
     server = ThreadingHTTPServer((args.host, args.port), TriggerHandler)
     server.config = config
     server.trigger_token = args.token

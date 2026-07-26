@@ -10,9 +10,24 @@ sys.path.insert(0, str(ROOT))
 
 import ae_render_worker
 import ae_render_registry
+import ae_render_queue
 
 
 class RenderWorkerPayloadTests(unittest.TestCase):
+    def test_expired_claim_is_recovered_after_worker_restart(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            queue_path = Path(temp_dir) / "queue.json"
+            created, was_created = ae_render_queue.enqueue(queue_path, "plaque", {"name": "Иванов Иван"}, source_key="plaque:1")
+            self.assertTrue(was_created)
+            claimed = ae_render_queue.claim_next(queue_path, lease_seconds=1)
+            self.assertEqual(created["id"], claimed["id"])
+            ae_render_queue.update_job(queue_path, claimed["id"], lease_expires_at="2000-01-01T00:00:00")
+
+            recovered = ae_render_queue.recover_expired_jobs(queue_path)
+
+            self.assertEqual([claimed["id"]], [job["id"] for job in recovered])
+            self.assertEqual("queued", ae_render_queue.load_queue_unlocked(queue_path)["jobs"][0]["status"])
+
     def setUp(self):
         self.config = {
             "project_path": "/tmp/source.aep",
@@ -133,7 +148,7 @@ class RenderWorkerPayloadTests(unittest.TestCase):
         original_claim = ae_render_worker.ae_render_queue.claim_next
         try:
             ae_render_worker.renderer_busy = lambda config: calls.append("busy-check")
-            ae_render_worker.ae_render_queue.claim_next = lambda queue_path: None
+            ae_render_worker.ae_render_queue.claim_next = lambda *args: None
 
             self.assertFalse(ae_render_worker.run_once({"queue_path": "/tmp/queue.json"}))
             self.assertEqual([], calls)

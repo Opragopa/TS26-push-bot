@@ -71,15 +71,15 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(first["ДЕНЬ"], "ДЕНЬ 1")
         self.assertEqual(first["ПЛОЩАДКА"], "Амфитеатр")
         self.assertEqual(first["ТЕМА"], "Тема открытия")
-        self.assertEqual(first["ИМЯ_КОМПОЗИЦИИ"], "Амфитеатр/Тема открытия")
+        self.assertEqual(first["ИМЯ_КОМПОЗИЦИИ"], "Тема открытия")
         self.assertTrue(records["badges"])
         self.assertIn("ДОСТОВЕРНОСТЬ", records["badges"][0])
         self.assertIn("МОУШЕН_ГОТОВО", records["badges"][0])
 
-    def test_session_comp_name_shortens_plenary_amphitheater(self):
+    def test_session_comp_name_uses_only_topic(self):
         self.assertEqual(
             ae_content_plan.session_comp_name("АМФИТЕАТР ОСНОВНАЯ / ПЛЕНАРНАЯ", "Выборы 2026"),
-            "АМФИТЕАТР/Выборы 2026",
+            "Выборы 2026",
         )
 
     def test_parser_keeps_name_and_position_in_one_badge(self):
@@ -111,6 +111,14 @@ class AEReadyContentPlanTests(unittest.TestCase):
             position_reference=reference,
         )
         self.assertEqual(records["badges"][0]["Должность"], "Согласованная должность")
+
+    def test_exact_reference_name_wins_over_partial_alias(self):
+        reference = {
+            "ивановиваниванович": {"position": "Точная должность", "ambiguous": False},
+            "иванов|иван": {"position": "Чужая должность", "ambiguous": False},
+        }
+        found = ae_content_plan.find_position_reference("Иванов Иван Иванович", reference)
+        self.assertEqual("Точная должность", found["position"])
 
     def test_parser_shortens_topic_and_keeps_concise_description(self):
         rows = [

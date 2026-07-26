@@ -12,6 +12,7 @@ import urllib.parse
 
 TIME_HEADER = "ВРЕМЯ"
 COMP_NAME_HEADER = "ИМЯ_КОМПОЗИЦИИ"
+AE_READY_CONTRACT_VERSION = "ae-ready/v1"
 
 TOPIC_FIELDS = ["topic_id", "ТЕМА", "ОПИСАНИЕ", "ИСХОДНАЯ_ЯЧЕЙКА"]
 VENUE_FIELDS = ["venue_id", "source_column", "ПЛОЩАДКА", "ЦВЕТ"]
@@ -198,8 +199,7 @@ def comp_venue_name(value):
 
 def session_comp_name(venue_name, topic_title):
     topic = clean_topic(topic_title)
-    venue = comp_venue_name(venue_name)
-    return "{}/{}".format(venue, topic) if venue and topic else topic
+    return topic
 
 
 def detect_layout(rows):
@@ -488,10 +488,16 @@ def merge_person(people_by_key, person, source_cell):
 
 def person_name_keys(value):
     tokens = re.findall(r"[0-9a-zа-яё]+", inline_text(value).lower().replace("ё", "е"))
-    keys = {normalize_key(value)} if tokens else set()
+    if not tokens:
+        return []
+    keys = [normalize_key(value)]
+    pair_keys = set()
     for left in range(len(tokens)):
         for right in range(left + 1, len(tokens)):
-            keys.add("|".join(sorted([tokens[left], tokens[right]])))
+            pair_keys.add("|".join(sorted([tokens[left], tokens[right]])))
+    for key in sorted(pair_keys):
+        if key not in keys:
+            keys.append(key)
     return keys
 
 
@@ -713,6 +719,7 @@ def build_records(rows, corrector=None, confidence_threshold=0.82, position_refe
     }
     records["legacy_sessions"] = legacy_sessions(records)
     report = {
+        "contract_version": AE_READY_CONTRACT_VERSION,
         "sessions_found": len(sessions),
         "topics_found": len(topics),
         "people_found": len(session_people),
