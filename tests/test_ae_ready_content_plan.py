@@ -73,6 +73,8 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(first["ТЕМА"], "Тема открытия")
         self.assertEqual(first["ИМЯ_КОМПОЗИЦИИ"], "Амфитеатр/Тема открытия")
         self.assertTrue(records["badges"])
+        self.assertIn("ДОСТОВЕРНОСТЬ", records["badges"][0])
+        self.assertIn("МОУШЕН_ГОТОВО", records["badges"][0])
 
     def test_session_comp_name_shortens_plenary_amphitheater(self):
         self.assertEqual(
@@ -139,6 +141,28 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(records["badges"][0]["Должность"], "Заместитель руководителя Росмолодежи")
         self.assertEqual(records["badges"][1]["Должность"], "программный директор форума")
 
+    def test_badge_with_warning_is_not_motion_ready(self):
+        sample_tsv = """ВРЕМЯ\tАмфитеатр\tУРАЛ 1 (синий) (200 мест)\tУРАЛ 2 (красный) (200 мест)
+ДЕНЬ 1  ·  20.07  ·  [ТЕМА: Тест]
+16:45-17:30\tГлавная встреча дня 1) сомнительный фрагмент, который требует LLM проверки. Спикер: Иванов Иван Иванович, Директор\t\t
+"""
+        rows = ae_content_plan.parse_table_rows(sample_tsv)
+
+        def corrector(_context):
+            return {
+                "topic": "Главная встреча дня",
+                "description": "",
+                "format": "Главная встреча дня",
+                "people": [{"name": "Иванов Иван Иванович", "position": "Директор", "role": "Спикер"}],
+                "warnings": ["Нужно проверить формулировку."],
+                "confidence": 0.95,
+            }
+
+        records = ae_content_plan.build_records(rows, corrector=corrector)
+
+        self.assertEqual(records["badges"][0]["ДОСТОВЕРНОСТЬ"], "0.95")
+        self.assertEqual(records["badges"][0]["МОУШЕН_ГОТОВО"], "0")
+
     def test_sync_skips_when_source_hash_unchanged(self):
         state = {monitor.AE_READY_STATE_KEY: {"source_hash": "same", "spreadsheet_id": "ae123"}}
         with mock.patch.object(monitor, "fetch_sheet", return_value={"hash": "same", "cells": [], "rows": 0, "bytes": 0}), mock.patch.object(monitor, "get_google_client") as google:
@@ -153,7 +177,7 @@ class AEReadyContentPlanTests(unittest.TestCase):
         rows = ae_content_plan.parse_table_rows(SAMPLE_TSV)
         current = {"hash": "newhash", "cells": rows, "rows": len(rows), "bytes": len(SAMPLE_TSV)}
 
-        with mock.patch.object(monitor, "fetch_sheet", return_value=current), mock.patch.object(monitor, "get_google_client", return_value=client), mock.patch.object(monitor, "build_ae_llm_corrector", return_value=None):
+        with mock.patch.object(monitor, "fetch_sheet", return_value=current), mock.patch.object(monitor, "get_google_client", return_value=client), mock.patch.object(monitor, "build_ae_llm_corrector", return_value=None), mock.patch.object(monitor, "sync_ae_ready_badges_to_motion_sheet", return_value={"synced": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}):
             result = monitor.run_ae_ready_sync(self.args, state, force=True)
 
         self.assertTrue(result["changed"])
@@ -163,6 +187,23 @@ class AEReadyContentPlanTests(unittest.TestCase):
         sessions_values = client.spreadsheet._worksheets["content_plan_sessions"].values
         self.assertEqual(sessions_values[0], ae_content_plan.LEGACY_SESSION_FIELDS)
         self.assertEqual(client.created, [monitor.AE_READY_SPREADSHEET_TITLE])
+
+    def test_sync_high_confidence_badges_to_motion_sheet(self):
+        records = {
+            "badges": [
+                {"ФИО спикера": "Иванов Иван", "Должность": "Директор", "ДОСТОВЕРНОСТЬ": "0.95", "МОУШЕН_ГОТОВО": "1"},
+                {"ФИО спикера": "Петров Петр", "Должность": "Методист", "ДОСТОВЕРНОСТЬ": "0.50", "МОУШЕН_ГОТОВО": "1"},
+                {"ФИО спикера": "Сидоров Сидор", "Должность": "Продюсер", "ДОСТОВЕРНОСТЬ": "1.00", "МОУШЕН_ГОТОВО": "0"},
+            ]
+        }
+
+        with mock.patch.object(monitor, "write_plaque_to_sheet", return_value={"action": "created"}) as write:
+            result = monitor.sync_ae_ready_badges_to_motion_sheet(records)
+
+        self.assertEqual(result["synced"], 1)
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["skipped"], 2)
+        write.assert_called_once_with("Иванов Иван", "Директор", note_text=monitor.AE_READY_PLAQUE_NOTE_TEXT)
 
     def test_state_source_url_overrides_env_default(self):
         state = {monitor.AE_READY_STATE_KEY: {"source_url": "https://docs.google.com/spreadsheets/d/custom/edit?gid=1"}}

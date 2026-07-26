@@ -41,6 +41,16 @@ def env_int(name, default):
         return default
 
 
+def env_float(name, default):
+    value = os.environ.get(name)
+    if value is None or not str(value).strip():
+        return default
+    try:
+        return float(str(value).replace(",", "."))
+    except ValueError:
+        return default
+
+
 def load_time_zone(name, fallback_offset_hours):
     try:
         return ZoneInfo(name)
@@ -76,7 +86,10 @@ TELEGRAM_PARSE_MODE = "HTML"
 AE_READY_STATE_KEY = "_ae_ready_content_plan"
 AE_READY_SOURCE_URL = os.environ.get("AE_READY_SOURCE_URL", "https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400")
 AE_READY_SPREADSHEET_TITLE = os.environ.get("AE_READY_SPREADSHEET_TITLE", "TS26 AE-ready Content Plan")
-AE_READY_CONFIDENCE_THRESHOLD = float(os.environ.get("AI_CORRECTION_CONFIDENCE_THRESHOLD", "0.82"))
+AE_READY_CONFIDENCE_THRESHOLD = env_float("AI_CORRECTION_CONFIDENCE_THRESHOLD", 0.82)
+AE_READY_PLAQUE_SYNC_ENABLED = env_bool("AE_READY_PLAQUE_SYNC_ENABLED", True)
+AE_READY_PLAQUE_CONFIDENCE_THRESHOLD = env_float("AE_READY_PLAQUE_CONFIDENCE_THRESHOLD", 0.9)
+AE_READY_PLAQUE_NOTE_TEXT = os.environ.get("AE_READY_PLAQUE_NOTE_TEXT", "<-- добавлено из AE-ready")
 DIFF_BOUNDARY_CHARS = " \t,.;:!?-–—()[]{}«»\"'"
 PLAQUE_SPREADSHEET_ID = os.environ.get("PLAQUE_SPREADSHEET_ID", "1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js")
 PLAQUE_WORKSHEET_GID = int(os.environ.get("PLAQUE_WORKSHEET_GID", "1399617264"))
@@ -2164,6 +2177,13 @@ def ae_status_report(state):
         "Сессии: {}".format(data.get("sessions") or 0),
         "Люди: {}".format(data.get("unique_people") or 0),
         "Плашки: {}".format(data.get("badges") or 0),
+        "Плашки в МОУШЕН: {} (создано {}, обновлено {}, пропущено {}, ошибок {})".format(
+            data.get("motion_synced") or 0,
+            data.get("motion_created") or 0,
+            data.get("motion_updated") or 0,
+            data.get("motion_skipped") or 0,
+            len(data.get("motion_errors") or []),
+        ),
         "Визитки: {}".format(data.get("cards") or 0),
         "Warnings: {}".format(data.get("warnings_count") or 0),
     ]
@@ -2269,6 +2289,61 @@ def enqueue_session_topic_renders(records):
     return queued
 
 
+def ae_badge_confidence(row):
+    try:
+        return float(str(row.get("ДОСТОВЕРНОСТЬ") or "0").replace(",", "."))
+    except ValueError:
+        return 0.0
+
+
+def ae_badge_ready_for_motion(row):
+    return (
+        str(row.get("МОУШЕН_ГОТОВО") or "").strip() == "1"
+        and normalize_person_name(row.get("ФИО спикера", ""))
+        and normalize_space(row.get("Должность", ""))
+        and ae_badge_confidence(row) >= AE_READY_PLAQUE_CONFIDENCE_THRESHOLD
+    )
+
+
+def sync_ae_ready_badges_to_motion_sheet(records):
+    result = {"enabled": AE_READY_PLAQUE_SYNC_ENABLED, "synced": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}
+    badges = records.get("badges") or []
+    if not AE_READY_PLAQUE_SYNC_ENABLED:
+        result["skipped"] = len(badges)
+        return result
+
+    selected = {}
+    for badge in badges:
+        if not ae_badge_ready_for_motion(badge):
+            result["skipped"] += 1
+            continue
+        key = normalize_person_key(badge.get("ФИО спикера", ""))
+        current = selected.get(key)
+        if current is None or ae_badge_confidence(badge) > ae_badge_confidence(current):
+            if current is not None:
+                result["skipped"] += 1
+            selected[key] = badge
+        else:
+            result["skipped"] += 1
+
+    for badge in selected.values():
+        try:
+            name = validate_person_name(badge.get("ФИО спикера", ""))
+            position = validate_position(badge.get("Должность", ""))
+            write_result = write_plaque_to_sheet(name, position, note_text=AE_READY_PLAQUE_NOTE_TEXT)
+        except (MonitorError, ConfigError, ValueError) as exc:
+            message = "{}: {}".format(badge.get("ФИО спикера") or "без имени", exc)
+            result["errors"].append(message)
+            log("AE-ready плашка не перенесена в МОУШЕН: {}".format(message))
+            continue
+        result["synced"] += 1
+        if write_result.get("action") == "created":
+            result["created"] += 1
+        elif write_result.get("action") == "updated":
+            result["updated"] += 1
+    return result
+
+
 def run_ae_ready_sync(args, state, force=False, rebuild=False):
     source_url = ae_ready_source_url(state)
     source_sheet = {"label": "Контент-план", "url": source_url}
@@ -2282,6 +2357,7 @@ def run_ae_ready_sync(args, state, force=False, rebuild=False):
     client = get_google_client(include_drive=False)
     spreadsheet = get_or_create_ae_spreadsheet(client, state, rebuild=rebuild)
     write_ae_records_to_spreadsheet(spreadsheet, records)
+    motion_sync = sync_ae_ready_badges_to_motion_sheet(records)
     queued_session_topics = enqueue_session_topic_renders(records)
     spreadsheet_id = getattr(spreadsheet, "id", "") or ae_ready_spreadsheet_id(state)
     report = records.get("report") or {}
@@ -2297,12 +2373,23 @@ def run_ae_ready_sync(args, state, force=False, rebuild=False):
         "cards": report.get("cards", 0),
         "warnings_count": len(records.get("warnings") or []),
         "warnings": records.get("warnings") or [],
+        "motion_synced": motion_sync["synced"],
+        "motion_created": motion_sync["created"],
+        "motion_updated": motion_sync["updated"],
+        "motion_skipped": motion_sync["skipped"],
+        "motion_errors": motion_sync["errors"][:10],
     })
     return {
         "changed": True,
         "spreadsheet_id": spreadsheet_id,
-        "message": "AE-ready обновлена: сессий {}, людей {}, плашек {}, визиток {}, warnings {}, тем поставлено в рендер {}.".format(
-            data["sessions"], data["unique_people"], data["badges"], data["cards"], data["warnings_count"], queued_session_topics
+        "message": "AE-ready обновлена: сессий {}, людей {}, плашек {}, визиток {}, warnings {}, в МОУШЕН {}, тем поставлено в рендер {}.".format(
+            data["sessions"],
+            data["unique_people"],
+            data["badges"],
+            data["cards"],
+            data["warnings_count"],
+            data["motion_synced"],
+            queued_session_topics,
         ),
     }
 
@@ -2351,12 +2438,12 @@ def plaque_cell_from_row(row, col_index):
     return row[col_index - 1] if len(row) >= col_index else ""
 
 
-def verify_plaque_row(worksheet, row_index, name, position):
+def verify_plaque_row(worksheet, row_index, name, position, note_text=PLAQUE_NOTE_TEXT):
     row = run_google_action("Не удалось проверить записанную строку", lambda: worksheet.row_values(row_index))
     actual_name = normalize_space(plaque_cell_from_row(row, PLAQUE_NAME_COL))
     actual_position = normalize_space(plaque_cell_from_row(row, PLAQUE_POSITION_COL))
     actual_note = normalize_space(plaque_cell_from_row(row, PLAQUE_NOTE_COL))
-    expected_note = normalize_space(PLAQUE_NOTE_TEXT)
+    expected_note = normalize_space(note_text)
     if actual_name != normalize_space(name) or actual_position != normalize_space(position) or actual_note != expected_note:
         raise ConfigError(
             "Google Sheets принял запрос, но проверка строки не совпала.\n"
@@ -2367,7 +2454,7 @@ def verify_plaque_row(worksheet, row_index, name, position):
                 row_index,
                 name,
                 position,
-                PLAQUE_NOTE_TEXT,
+                note_text,
                 actual_name or "пусто",
                 actual_position or "пусто",
                 actual_note or "пусто",
@@ -2402,14 +2489,14 @@ def column_letter(index):
     return letters
 
 
-def write_plaque_to_sheet(name, position):
+def write_plaque_to_sheet(name, position, note_text=PLAQUE_NOTE_TEXT):
     worksheet = get_plaque_worksheet()
     values = run_google_action("Не удалось прочитать строки листа для плашек", worksheet.get_all_values)
     row_index, action = find_plaque_row(values, name)
     updates = [
         {"range": "{}{}".format(column_letter(PLAQUE_NAME_COL), row_index), "values": [[name]]},
         {"range": "{}{}".format(column_letter(PLAQUE_POSITION_COL), row_index), "values": [[position]]},
-        {"range": "{}{}".format(column_letter(PLAQUE_NOTE_COL), row_index), "values": [[PLAQUE_NOTE_TEXT]]},
+        {"range": "{}{}".format(column_letter(PLAQUE_NOTE_COL), row_index), "values": [[note_text]]},
     ]
     log("Запись плашки: spreadsheet={}, worksheet='{}' gid={}, row={}, action={}, name='{}'".format(
         PLAQUE_SPREADSHEET_ID,
@@ -2420,7 +2507,7 @@ def write_plaque_to_sheet(name, position):
         name,
     ))
     run_google_action("Не удалось записать плашку в Google Sheets", lambda: worksheet.batch_update(updates, value_input_option="USER_ENTERED"))
-    verified = verify_plaque_row(worksheet, row_index, name, position)
+    verified = verify_plaque_row(worksheet, row_index, name, position, note_text=note_text)
     return {
         "row": row_index,
         "action": action,

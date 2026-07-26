@@ -24,7 +24,11 @@ SESSION_PEOPLE_FIELDS = [
     "card_needed", "ИСХОДНАЯ_ЯЧЕЙКА",
 ]
 PEOPLE_FIELDS = ["person_id", "ФИО спикера", "normalized_name", "Должность", "Фото на плашку", "ИСХОДНЫЕ_ЯЧЕЙКИ"]
-BADGE_FIELDS = ["session_id", "person_id", "ДЕНЬ", "ДАТА", "ВРЕМЯ", "НАЧАЛО", "ПЛОЩАДКА", "ФИО спикера", "Должность", "Фото на плашку"]
+BADGE_FIELDS = [
+    "session_id", "person_id", "ДЕНЬ", "ДАТА", "ВРЕМЯ", "НАЧАЛО", "ПЛОЩАДКА",
+    "ФИО спикера", "Должность", "Фото на плашку", "ИСХОДНАЯ_ЯЧЕЙКА",
+    "ДОСТОВЕРНОСТЬ", "МОУШЕН_ГОТОВО",
+]
 CARD_FIELDS = ["person_id", "ФИО спикера", "Должность", "Фото на плашку", "card_status", "card_warning"]
 LEGACY_SESSION_FIELDS = ["ДЕНЬ", "ДАТА", "ВРЕМЯ", "ПЛОЩАДКА", "ТЕМА", "ОПИСАНИЕ", "ТИП", COMP_NAME_HEADER, "ИСХОДНАЯ_ЯЧЕЙКА"]
 WARNING_FIELDS = ["level", "source_cell", "message", "raw_text", "confidence"]
@@ -451,6 +455,16 @@ def add_warning(warnings, level, source_cell, message, raw_text="", confidence="
     })
 
 
+def confidence_value(value, default=1.0):
+    text = inline_text(value)
+    if not text:
+        return default
+    try:
+        return float(text.replace(",", "."))
+    except ValueError:
+        return default
+
+
 def merge_person(people_by_key, person, source_cell):
     key = person["normalized_name"]
     if key not in people_by_key:
@@ -600,12 +614,20 @@ def build_records(rows, corrector=None, confidence_threshold=0.82):
     session_people = list(session_people_by_key.values())
     sessions_by_id = {row["session_id"]: row for row in sessions}
     people_by_id = {row["person_id"]: row for row in people}
+    source_meta_by_cell = {row["source_cell"]: row for row in source_cells}
+    warning_source_cells = {row.get("source_cell") for row in warnings if row.get("source_cell")}
     badges_by_key = {}
     for relation in session_people:
         session = sessions_by_id.get(relation["session_id"], {})
         person = people_by_id.get(relation["person_id"], {})
         badge_key = "{}|{}".format(relation["session_id"], relation["person_id"])
         if badge_key not in badges_by_key:
+            source_cell = relation.get("ИСХОДНАЯ_ЯЧЕЙКА", "")
+            source_meta = source_meta_by_cell.get(source_cell, {})
+            confidence = confidence_value(source_meta.get("llm_confidence"), default=1.0)
+            name = person.get("ФИО спикера", relation["ФИО спикера"])
+            position = relation["Должность"] or person.get("Должность", "")
+            motion_ready = bool(name and position and source_cell not in warning_source_cells and confidence >= confidence_threshold)
             badges_by_key[badge_key] = {
                 "session_id": relation["session_id"],
                 "person_id": relation["person_id"],
@@ -614,9 +636,12 @@ def build_records(rows, corrector=None, confidence_threshold=0.82):
                 "ВРЕМЯ": session.get("ВРЕМЯ", ""),
                 "НАЧАЛО": session.get("НАЧАЛО", ""),
                 "ПЛОЩАДКА": session.get("ПЛОЩАДКА", ""),
-                "ФИО спикера": person.get("ФИО спикера", relation["ФИО спикера"]),
-                "Должность": relation["Должность"] or person.get("Должность", ""),
+                "ФИО спикера": name,
+                "Должность": position,
                 "Фото на плашку": person.get("Фото на плашку", ""),
+                "ИСХОДНАЯ_ЯЧЕЙКА": source_cell,
+                "ДОСТОВЕРНОСТЬ": "{:.2f}".format(confidence),
+                "МОУШЕН_ГОТОВО": "1" if motion_ready else "0",
             }
     badges = list(badges_by_key.values())
     card_person_ids = {row["person_id"] for row in session_people if row["card_needed"] == "1"}

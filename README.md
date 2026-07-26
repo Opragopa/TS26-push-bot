@@ -176,9 +176,14 @@ AI_CORRECTION_PROVIDER=deepseek
 AI_CORRECTION_FALLBACK_PROVIDER=groq
 DEEPSEEK_API_KEY=ваш_ключ_DeepSeek
 DEEPSEEK_MODEL=deepseek-v4-pro
+AE_READY_PLAQUE_SYNC_ENABLED=true
+AE_READY_PLAQUE_CONFIDENCE_THRESHOLD=0.9
+AE_READY_PLAQUE_NOTE_TEXT=<-- добавлено из AE-ready
 ```
 
 `AE_READY_SPREADSHEET_ID` можно не задавать: при первом `/ae_sync` бот создаст новую таблицу и сохранит id в `sheet_state.json`. Если таблицу нужно расшарить на ваш Google-аккаунт, задайте `AE_READY_SHARE_EMAILS=email@example.com`.
+
+При каждом успешном AE-ready sync бот также может переносить в лист `МОУШЕН` только плашки с `МОУШЕН_ГОТОВО=1`, заполненными ФИО/должностью и достоверностью не ниже `AE_READY_PLAQUE_CONFIDENCE_THRESHOLD`. Оригинальный `Контент-план` при этом не изменяется.
 
 ## Рендер плашек через aerender
 
