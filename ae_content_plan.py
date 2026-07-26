@@ -486,7 +486,49 @@ def merge_person(people_by_key, person, source_cell):
     return item
 
 
-def build_records(rows, corrector=None, confidence_threshold=0.82):
+def person_name_keys(value):
+    tokens = re.findall(r"[0-9a-zа-яё]+", inline_text(value).lower().replace("ё", "е"))
+    keys = {normalize_key(value)} if tokens else set()
+    for left in range(len(tokens)):
+        for right in range(left + 1, len(tokens)):
+            keys.add("|".join(sorted([tokens[left], tokens[right]])))
+    return keys
+
+
+def find_position_reference(name, position_reference):
+    for key in person_name_keys(name):
+        item = position_reference.get(key)
+        if item:
+            return item
+    return None
+
+
+def position_reference_candidates(people, position_reference):
+    if not position_reference:
+        return []
+    result = []
+    for person in people or []:
+        item = find_position_reference(person.get("name", ""), position_reference)
+        if not item:
+            continue
+        result.append({"name": person.get("name", ""), "position": item.get("position", ""), "ambiguous": item.get("ambiguous", False)})
+    return result
+
+
+def apply_position_reference(people, position_reference):
+    if not position_reference:
+        return people
+    result = []
+    for person in people or []:
+        item = dict(person)
+        reference = find_position_reference(item.get("name", ""), position_reference)
+        if reference and not reference.get("ambiguous") and reference.get("position"):
+            item["position"] = reference["position"]
+        result.append(item)
+    return result
+
+
+def build_records(rows, corrector=None, confidence_threshold=0.82, position_reference=None):
     layout = detect_layout(rows)
     venues = venues_from_rows(rows, layout)
     venue_by_index = {item["column_index"]: item for item in venues}
@@ -539,6 +581,7 @@ def build_records(rows, corrector=None, confidence_threshold=0.82):
                     "venue": venue["name"],
                     "raw_text": inline_text(cell),
                     "parser": parsed,
+                    "position_reference": position_reference_candidates(people, position_reference),
                 })
                 parsed, llm_applied, llm_confidence, llm_warnings = apply_llm_correction(parsed, correction, confidence_threshold)
                 if llm_applied:
@@ -547,7 +590,7 @@ def build_records(rows, corrector=None, confidence_threshold=0.82):
                     add_warning(warnings, "warning", source_cell, item, cell, llm_confidence)
             topic = parsed.get("topic") or ""
             description = parsed.get("description") or ""
-            people = parsed.get("people") or []
+            people = apply_position_reference(parsed.get("people") or [], position_reference)
             source_cells.append({
                 "source_cell": source_cell,
                 "ДЕНЬ": current_day["day"],

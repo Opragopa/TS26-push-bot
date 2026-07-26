@@ -85,6 +85,10 @@ TELEGRAM_QUOTE_END = "::endquote"
 TELEGRAM_PARSE_MODE = "HTML"
 AE_READY_STATE_KEY = "_ae_ready_content_plan"
 AE_READY_SOURCE_URL = os.environ.get("AE_READY_SOURCE_URL", "https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400")
+AE_POSITION_REFERENCE_URL = os.environ.get(
+    "AE_POSITION_REFERENCE_URL",
+    "https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=0#gid=0",
+)
 AE_READY_SPREADSHEET_TITLE = os.environ.get("AE_READY_SPREADSHEET_TITLE", "TS26 AE-ready Content Plan")
 AE_READY_CONFIDENCE_THRESHOLD = env_float("AI_CORRECTION_CONFIDENCE_THRESHOLD", 0.82)
 AE_READY_PLAQUE_SYNC_ENABLED = env_bool("AE_READY_PLAQUE_SYNC_ENABLED", True)
@@ -234,6 +238,47 @@ def fetch_sheet(url, timeout):
         "cells": rows,
         "content_type": content_type,
         "export_url": export_url,
+    }
+
+
+def position_reference_from_sheet(sheet):
+    rows = sheet.get("cells") or []
+    name_aliases = {"фио", "фио спикера", "фиоспикера", "имя", "спикер", "name"}
+    position_aliases = {"должность", "регалии", "position", "title"}
+    header_index = None
+    name_index = None
+    position_index = None
+    for row_index, row in enumerate(rows[:30]):
+        headers = [normalize_header(value) for value in row]
+        candidate_name = next((index for index, value in enumerate(headers) if value in name_aliases), None)
+        candidate_position = next((index for index, value in enumerate(headers) if value in position_aliases), None)
+        if candidate_name is not None and candidate_position is not None:
+            header_index = row_index
+            name_index = candidate_name
+            position_index = candidate_position
+            break
+    if header_index is None:
+        raise MonitorError("В справочнике не найдены колонки ФИО и Должность.")
+
+    positions = {}
+    for row in rows[header_index + 1 :]:
+        name = normalize_space(row[name_index] if name_index < len(row) else "")
+        position = normalize_space(row[position_index] if position_index < len(row) else "")
+        keys = ae_content_plan.person_name_keys(name)
+        if not keys or not position:
+            continue
+        for key in keys:
+            current = positions.setdefault(key, {"name": name, "positions": []})
+            if position not in current["positions"]:
+                current["positions"].append(position)
+
+    return {
+        key: {
+            "name": item["name"],
+            "position": item["positions"][0] if len(item["positions"]) == 1 else "",
+            "ambiguous": len(item["positions"]) > 1,
+        }
+        for key, item in positions.items()
     }
 
 
@@ -911,6 +956,7 @@ def ae_correction_instructions():
         "Если описание сводится к повтору темы, верни пустую строку. "
         "Если в raw_text есть маркер 'главная встреча дня', описание должно быть 'Главная встреча дня'. "
         "Нумерацию вида '1)'/'2)' не включай ни в тему, ни в должности, ни в имена. "
+        "Если передан position_reference, это согласованный справочник: при точном совпадении верни должность ровно из справочника, без перефразирования. "
         "Если сомневаешься, оставь поле пустым и добавь предупреждение. "
         "Схема: {\"topic\":\"\",\"description\":\"\",\"format\":\"\",\"people\":[{\"name\":\"\",\"role\":\"\",\"position\":\"\"}],\"warnings\":[],\"confidence\":0.0}. "
         "Ответ должен быть компактным, одной JSON-структурой, без пояснений до и после."
@@ -926,6 +972,7 @@ def ae_correction_payload(context):
         "venue": context.get("venue", ""),
         "raw_text": context.get("raw_text", ""),
         "regular_parser": context.get("parser", {}),
+        "position_reference": context.get("position_reference", []),
     }
 
 
@@ -2351,8 +2398,15 @@ def run_ae_ready_sync(args, state, force=False, rebuild=False):
     data = ae_ready_state(state)
     if not force and data.get("source_hash") == current["hash"]:
         return {"changed": False, "message": "AE-ready таблица уже актуальна.", "spreadsheet_id": ae_ready_spreadsheet_id(state)}
+    reference_sheet = fetch_sheet(AE_POSITION_REFERENCE_URL, args.timeout)
+    position_reference = position_reference_from_sheet(reference_sheet)
     corrector = build_ae_llm_corrector(args)
-    records = ae_content_plan.build_records(current["cells"], corrector=corrector, confidence_threshold=AE_READY_CONFIDENCE_THRESHOLD)
+    records = ae_content_plan.build_records(
+        current["cells"],
+        corrector=corrector,
+        confidence_threshold=AE_READY_CONFIDENCE_THRESHOLD,
+        position_reference=position_reference,
+    )
     data_hash = ae_content_plan.records_hash(records)
     client = get_google_client(include_drive=False)
     spreadsheet = get_or_create_ae_spreadsheet(client, state, rebuild=rebuild)

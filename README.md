@@ -171,6 +171,7 @@ source_cells
 ```text
 AE_READY_SYNC_ENABLED=true
 AE_READY_SOURCE_URL=https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400
+AE_POSITION_REFERENCE_URL=https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=0#gid=0
 AE_READY_SPREADSHEET_TITLE=TS26 AE-ready Content Plan
 AI_CORRECTION_PROVIDER=deepseek
 AI_CORRECTION_FALLBACK_PROVIDER=groq

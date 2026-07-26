@@ -94,6 +94,24 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(records["badges"][0]["ФИО спикера"], "Памфилова Элла Александровна")
         self.assertIn("Председатель Центральной избирательной комиссии Российской Федерации", records["badges"][0]["Должность"])
 
+    def test_reference_position_is_authoritative(self):
+        sample_tsv = """ВРЕМЯ\tАмфитеатр\tУРАЛ 1\tУРАЛ 2
+ДЕНЬ 1 · 20.07 · [ТЕМА: Тест]
+17:30-19:00\tСпикер: Иванов Иван, старая должность\t\t
+"""
+        reference = {
+            "ивановиван": {
+                "name": "Иванов Иван",
+                "position": "Согласованная должность",
+                "ambiguous": False,
+            }
+        }
+        records = ae_content_plan.build_records(
+            ae_content_plan.parse_table_rows(sample_tsv),
+            position_reference=reference,
+        )
+        self.assertEqual(records["badges"][0]["Должность"], "Согласованная должность")
+
     def test_parser_shortens_topic_and_keeps_concise_description(self):
         rows = [
             ["ВРЕМЯ", "Амфитеатр", "УРАЛ 1 (синий) (200 мест)", "УРАЛ 2 (красный) (200 мест)"],
@@ -177,7 +195,8 @@ class AEReadyContentPlanTests(unittest.TestCase):
         rows = ae_content_plan.parse_table_rows(SAMPLE_TSV)
         current = {"hash": "newhash", "cells": rows, "rows": len(rows), "bytes": len(SAMPLE_TSV)}
 
-        with mock.patch.object(monitor, "fetch_sheet", return_value=current), mock.patch.object(monitor, "get_google_client", return_value=client), mock.patch.object(monitor, "build_ae_llm_corrector", return_value=None), mock.patch.object(monitor, "sync_ae_ready_badges_to_motion_sheet", return_value={"synced": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}):
+        reference = {"hash": "reference", "cells": [["№", "ФИО спикера", "Должность"], ["1", "Иванов Иван", "Директор"]]}
+        with mock.patch.object(monitor, "fetch_sheet", side_effect=[current, reference]), mock.patch.object(monitor, "get_google_client", return_value=client), mock.patch.object(monitor, "build_ae_llm_corrector", return_value=None), mock.patch.object(monitor, "sync_ae_ready_badges_to_motion_sheet", return_value={"synced": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}):
             result = monitor.run_ae_ready_sync(self.args, state, force=True)
 
         self.assertTrue(result["changed"])
