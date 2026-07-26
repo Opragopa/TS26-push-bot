@@ -1140,6 +1140,8 @@ def render_telegram_body(message):
     for raw_line in str(message or "").splitlines():
         line = normalize_space(raw_line)
         if not line:
+            if not in_quote and rendered and rendered[-1] != "":
+                rendered.append("")
             continue
         if line == TELEGRAM_QUOTE_START:
             in_quote = True
@@ -1157,7 +1159,9 @@ def render_telegram_body(message):
         rendered.append(render_telegram_change_line(line))
     if quote_lines:
         rendered.append(render_telegram_quote(quote_lines))
-    return "\n\n".join(rendered)
+    while rendered and rendered[-1] == "":
+        rendered.pop()
+    return "\n".join(rendered)
 
 
 def render_telegram_quote(lines):
@@ -1224,7 +1228,7 @@ def render_telegram_change_line(line):
         _sheet, row_name = deleted_match.groups()
         return "• <b>Удалена строка:</b> {}".format(h(row_name))
 
-    return "• {}".format(h(line))
+    return h(line)
 
 
 def admin_keyboard():
@@ -2567,8 +2571,8 @@ def confirm_plaque(args, state, chat_id):
             render_text = " " + plaque_render_message(item.get("render", {}))
             public_lines.append("{}. {}: {} — {}.{}".format(index, action_text.capitalize(), entry["name"], entry["position"], render_text))
         admin_lines = [
-            "Пакетная отправка плашек.",
-            "Добавлено: {}. Обновлено: {}.".format(created_count, updated_count),
+            "Пакетная отправка плашек",
+            "Итог: добавлено {}, обновлено {}.".format(created_count, updated_count),
             "",
         ]
         for index, item in enumerate(results, start=1):
@@ -2576,14 +2580,13 @@ def confirm_plaque(args, state, chat_id):
             entry = item["entry"]
             result = item["result"]
             admin_lines.append(
-                "{}. Плашка {}.\nЛист: {} (gid={})\nСтрока: {}\nФИО: {}\nДолжность: {}\n{}".format(
+                "{}. {}: {} — {}\nСтрока {} · {}\n{}".format(
                     index,
-                    action_text,
-                    result["worksheet_title"],
-                    result["worksheet_gid"],
-                    result["row"],
+                    action_text.capitalize(),
                     entry["name"],
                     entry["position"],
+                    result["row"],
+                    result["worksheet_title"],
                     result["url"],
                 )
             )
@@ -2605,13 +2608,12 @@ def confirm_plaque(args, state, chat_id):
     action_text = "обновлена" if result["action"] == "updated" else "добавлена"
     render_message = plaque_render_message(render)
     public_message = "Плашка {}.\nФИО: {}\nДолжность: {}\n{}".format(action_text, name, position, render_message)
-    admin_message = "Плашка {}.\nЛист: {} (gid={})\nСтрока: {}\nФИО: {}\nДолжность: {}\n{}".format(
+    admin_message = "Плашка {}\n{} — {}\nСтрока {} · {}\n{}".format(
         action_text,
-        result["worksheet_title"],
-        result["worksheet_gid"],
-        result["row"],
         name,
         position,
+        result["row"],
+        result["worksheet_title"],
         result["url"],
     )
     send_plain_chat_message(args, chat_id, "TS26: готово", public_message, reply_markup=plaque_reply_keyboard())

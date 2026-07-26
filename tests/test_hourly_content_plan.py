@@ -230,6 +230,16 @@ class HourlyContentPlanTests(unittest.TestCase):
         self.assertNotIn(monitor.TELEGRAM_QUOTE_START, rendered)
         self.assertNotIn(monitor.TELEGRAM_QUOTE_END, rendered)
 
+    def test_plain_service_message_keeps_simple_lines_without_bullets(self):
+        rendered = monitor.render_telegram_message(
+            "TS26: плашки через бот",
+            "Пакетная отправка плашек\nИтог: добавлено 1, обновлено 0.\n\n1. Добавлена: Тестовый тест — тест\nСтрока 288 · Моушен\nhttps://docs.google.com/example",
+        )
+        self.assertIn("Пакетная отправка плашек\nИтог: добавлено 1, обновлено 0.", rendered)
+        self.assertIn("1. Добавлена: Тестовый тест — тест\nСтрока 288 · Моушен", rendered)
+        self.assertNotIn("• Пакетная отправка", rendered)
+        self.assertNotIn("• Итог:", rendered)
+
     def test_long_diff_is_chunked_below_telegram_limit(self):
         lines = ["Контент-план: строка «{}», колонка «Зал» - было «пусто», стало «{}».".format(index, "Текст " * 40) for index in range(70)]
         chunks = monitor.telegram_message_chunks("TS26: обновления за час", "\n".join(lines), subtitle="Контент-план")
@@ -305,6 +315,11 @@ class HourlyContentPlanTests(unittest.TestCase):
         admin_message = next(item for item in sent if item[0] == "999")[2]
         self.assertNotIn("https://docs.google.com", user_message)
         self.assertIn("https://docs.google.com/row280", admin_message)
+        self.assertIn("Итог: добавлено 1, обновлено 1.", admin_message)
+        self.assertIn("1. Добавлена: Иванов Иван — Должность 1", admin_message)
+        self.assertIn("Строка 280 · Моушен", admin_message)
+        self.assertNotIn("Лист: Моушен (gid=1399617264)", admin_message)
+        self.assertNotIn("ФИО:", admin_message)
         self.assertEqual(state["_plaque_sessions"], {})
 
     def test_plaque_access_is_limited_to_admins_user_mode_and_allowlist(self):
