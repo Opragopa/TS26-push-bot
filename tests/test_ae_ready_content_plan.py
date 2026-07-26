@@ -284,6 +284,17 @@ class AEReadyContentPlanTests(unittest.TestCase):
 
         self.assertEqual(result["topic"], "Тема")
 
+    def test_chat_completion_timeout_becomes_provider_error(self):
+        with mock.patch.object(monitor.urllib.request, "urlopen", side_effect=TimeoutError()):
+            with self.assertRaisesRegex(monitor.MonitorError, "DeepSeek не ответил"):
+                monitor.chat_completion_text(
+                    "DeepSeek",
+                    "https://api.deepseek.com/chat/completions",
+                    "deepseek-test",
+                    {"model": "test", "messages": []},
+                    timeout=7,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

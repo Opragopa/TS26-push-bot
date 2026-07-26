@@ -757,6 +757,8 @@ def groq_chat_completion_text(payload, timeout):
         raise MonitorError("Groq HTTP {}: {}".format(exc.code, body[:500]))
     except urllib.error.URLError as exc:
         raise MonitorError("Groq недоступен: {}".format(exc.reason))
+    except TimeoutError:
+        raise MonitorError("Groq не ответил за {} секунд.".format(timeout))
     try:
         parsed = json.loads(raw)
     except ValueError:
@@ -795,6 +797,8 @@ def chat_completion_text(provider_name, url, api_key, payload, timeout):
         raise MonitorError("{} HTTP {}: {}".format(provider_name, exc.code, body[:500]))
     except urllib.error.URLError as exc:
         raise MonitorError("{} недоступен: {}".format(provider_name, exc.reason))
+    except TimeoutError:
+        raise MonitorError("{} не ответил за {} секунд.".format(provider_name, timeout))
     try:
         parsed = json.loads(raw)
     except ValueError:
