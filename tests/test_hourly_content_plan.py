@@ -16,6 +16,8 @@ class HourlyContentPlanTests(unittest.TestCase):
             no_telegram=False,
             no_macos_notifications=True,
             quiet=True,
+            no_admin_buttons=False,
+            no_plaque_form=False,
         )
         self.sheet = {
             "label": "Контент-план",
@@ -357,6 +359,56 @@ class HourlyContentPlanTests(unittest.TestCase):
         self.assertEqual(sent[0][1], "TS26: старт")
         self.assertIn("Если вам нужен доступ к плашкам", sent[0][2])
         self.assertIsNone(sent[0][3])
+
+    def test_start_screen_shows_user_actions_with_plaque_access(self):
+        sent = []
+
+        def fake_send(_args, chat_id, title, message, reply_markup=None):
+            sent.append((chat_id, title, message, reply_markup))
+
+        with mock.patch.object(monitor, "send_plain_chat_message", side_effect=fake_send):
+            monitor.send_start_screen(self.args, "555", state={}, is_content_recipient=True, can_use_plaque=True)
+
+        self.assertEqual(sent[0][1], "TS26: старт")
+        self.assertIn("почасовые сводки", sent[0][2])
+        self.assertIn("пакетная отправка", sent[0][2])
+        keyboard = sent[0][3]["keyboard"]
+        self.assertEqual(keyboard[0][0]["text"], monitor.PLAQUE_ADD_BUTTON_TEXT)
+        self.assertEqual(keyboard[1][0]["text"], monitor.HELP_BUTTON_TEXT)
+
+    def test_admin_panel_has_clear_sections(self):
+        keyboard = monitor.admin_keyboard()
+        flattened = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+
+        self.assertIn("Мониторинг", flattened)
+        self.assertIn("Доступы", flattened)
+        self.assertIn("AE-ready", flattened)
+        self.assertIn("Пользовательский вид", flattened)
+
+    def test_admin_callback_opens_access_section(self):
+        sent = []
+        state = {}
+        callback = {
+            "id": "cb1",
+            "data": "dbg:menu:access",
+            "message": {"chat": {"id": "999"}},
+        }
+        old_admin_ids = os.environ.get("TELEGRAM_ADMIN_CHAT_IDS")
+        os.environ["TELEGRAM_ADMIN_CHAT_IDS"] = "999"
+        try:
+            with mock.patch.object(monitor, "answer_callback"), mock.patch.object(monitor, "send_admin_message", side_effect=lambda _args, chat_id, title, message, reply_markup=None: sent.append((chat_id, title, message, reply_markup))):
+                handled = monitor.handle_admin_callback(self.args, [self.sheet], state, callback)
+        finally:
+            if old_admin_ids is None:
+                os.environ.pop("TELEGRAM_ADMIN_CHAT_IDS", None)
+            else:
+                os.environ["TELEGRAM_ADMIN_CHAT_IDS"] = old_admin_ids
+
+        self.assertTrue(handled)
+        self.assertEqual(sent[0][1], "TS26: доступы")
+        self.assertIn("Контент-план", sent[0][2])
+        buttons = [button["text"] for row in sent[0][3]["inline_keyboard"] for button in row]
+        self.assertIn("Назад", buttons)
 
     def test_plaque_access_report_marks_added_users(self):
         state = {

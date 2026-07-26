@@ -1309,19 +1309,12 @@ def render_telegram_change_line(line):
     return h(line)
 
 
-def admin_keyboard():
-    return {
-        "inline_keyboard": [
+def admin_keyboard(section="home"):
+    if section == "monitoring":
+        rows = [
             [
                 {"text": "Статус", "callback_data": "dbg:status"},
                 {"text": "Получатели", "callback_data": "dbg:recipients"},
-            ],
-            [
-                {"text": "Контент-доступ", "callback_data": "dbg:content_access"},
-            ],
-            [
-                {"text": "AE sync", "callback_data": "dbg:ae_sync"},
-                {"text": "AE status", "callback_data": "dbg:ae_status"},
             ],
             [
                 {"text": "Тест Контент-план", "callback_data": "dbg:test:Контент-план"},
@@ -1331,18 +1324,57 @@ def admin_keyboard():
                 {"text": "Тест старта", "callback_data": "dbg:test:startup"},
                 {"text": "Google-доступ", "callback_data": "dbg:google_access"},
             ],
+            [{"text": "Назад", "callback_data": "dbg:home"}],
+        ]
+    elif section == "access":
+        rows = [
+            [
+                {"text": "Контент-план", "callback_data": "dbg:content_access"},
+                {"text": "Плашки", "callback_data": "dbg:plaque_access"},
+            ],
+            [{"text": "Получатели", "callback_data": "dbg:recipients"}],
+            [{"text": "Назад", "callback_data": "dbg:home"}],
+        ]
+    elif section == "ae":
+        rows = [
+            [
+                {"text": "Запустить sync", "callback_data": "dbg:ae_sync"},
+                {"text": "Статус", "callback_data": "dbg:ae_status"},
+            ],
+            [
+                {"text": "Warnings", "callback_data": "dbg:ae_warnings"},
+                {"text": "Ссылка", "callback_data": "dbg:ae_link"},
+            ],
+            [{"text": "Назад", "callback_data": "dbg:home"}],
+        ]
+    elif section == "user_tools":
+        rows = [
+            [{"text": PLAQUE_ADD_BUTTON_TEXT, "callback_data": "plq:start"}],
             [
                 {"text": "Превью формы", "callback_data": "dbg:preview_plaque"},
                 {"text": "Режим пользователя", "callback_data": "dbg:user_mode"},
             ],
-            [
-                {"text": "Стартовый экран", "callback_data": "dbg:start_screen"},
-            ],
+            [{"text": "Стартовый экран", "callback_data": "dbg:start_screen"}],
+            [{"text": "Назад", "callback_data": "dbg:home"}],
         ]
-    }
+    else:
+        rows = [
+            [{"text": PLAQUE_ADD_BUTTON_TEXT, "callback_data": "plq:start"}],
+            [
+                {"text": "Мониторинг", "callback_data": "dbg:menu:monitoring"},
+                {"text": "Доступы", "callback_data": "dbg:menu:access"},
+            ],
+            [
+                {"text": "AE-ready", "callback_data": "dbg:menu:ae"},
+                {"text": "Пользовательский вид", "callback_data": "dbg:menu:user_tools"},
+            ],
+            [{"text": "Общий статус", "callback_data": "dbg:status"}],
+        ]
+    return {"inline_keyboard": rows}
 
 
-PLAQUE_ADD_BUTTON_TEXT = "Добавить новую плашку"
+PLAQUE_ADD_BUTTON_TEXT = "Добавить плашку"
+HELP_BUTTON_TEXT = "Что умеет бот"
 
 
 def plaque_keyboard():
@@ -1361,7 +1393,7 @@ def plaque_user_mode_keyboard():
 
 def plaque_reply_keyboard():
     return {
-        "keyboard": [[{"text": PLAQUE_ADD_BUTTON_TEXT}]],
+        "keyboard": [[{"text": PLAQUE_ADD_BUTTON_TEXT}], [{"text": HELP_BUTTON_TEXT}]],
         "resize_keyboard": True,
         "is_persistent": True,
     }
@@ -1370,12 +1402,12 @@ def plaque_reply_keyboard():
 def plaque_confirm_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "Отправить в таблицу", "callback_data": "plq:confirm"}],
+            [{"text": "Отправить", "callback_data": "plq:confirm"}],
             [
-                {"text": "Изменить имя", "callback_data": "plq:edit_name"},
-                {"text": "Изменить должность", "callback_data": "plq:edit_position"},
+                {"text": "Имя", "callback_data": "plq:edit_name"},
+                {"text": "Должность", "callback_data": "plq:edit_position"},
+                {"text": "Отменить", "callback_data": "plq:cancel"},
             ],
-            [{"text": "Отменить", "callback_data": "plq:cancel"}],
         ]
     }
 
@@ -1421,6 +1453,47 @@ def recipients_report(sheets, state=None):
     for sheet in sheets:
         lines.append("{}: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы"))
     return "\n".join(lines)
+
+
+def admin_panel_text(args, sheets, state):
+    content_users = len(content_plan_chat_ids(state))
+    plaque_users = len(plaque_chat_ids(state))
+    ae_data = ae_ready_state(state)
+    last_sync = ae_data.get("last_synced_at") or "не было"
+    lines = [
+        "Панель управления TS26.",
+        "",
+        "Быстрые действия:",
+        "Добавить плашку - пройти форму самому.",
+        "Мониторинг - статус таблиц, получатели и тесты.",
+        "Доступы - кто получает Контент-план и кто может делать плашки.",
+        "AE-ready - синхронизация таблицы для After Effects.",
+        "",
+        "Коротко сейчас:",
+        "Контент-план: {} доп. получателей".format(content_users),
+        "Плашки: {} пользователей с доступом".format(plaque_users),
+        "AE-ready sync: {}".format(last_sync),
+    ]
+    return "\n".join(lines)
+
+
+def admin_section_text(section):
+    if section == "monitoring":
+        return "Мониторинг.\n\nПроверьте работу бота, получателей и доступ Google."
+    if section == "access":
+        return (
+            "Доступы.\n\n"
+            "Контент-план - пользователи получают почасовую сводку и полный diff.\n"
+            "Плашки - пользователи могут добавлять и обновлять плашки через форму."
+        )
+    if section == "ae":
+        return (
+            "AE-ready.\n\n"
+            "Бот читает исходный Контент-план, создает понятную AE-ready таблицу и переносит надежные плашки в МОУШЕН."
+        )
+    if section == "user_tools":
+        return "Пользовательский вид.\n\nЗдесь можно проверить, как бот выглядит для обычного пользователя."
+    return ""
 
 
 def content_access_report(state):
@@ -1520,45 +1593,56 @@ def status_report(args, sheets, state):
 
 
 def send_debug_menu(args, chat_id, sheets, state):
-    message = "{}\n\n{}".format(status_report(args, sheets, state), recipients_report(sheets, state=state))
-    send_admin_message(args, chat_id, "TS26: debug-панель", message, reply_markup=admin_keyboard())
+    send_admin_message(args, chat_id, "TS26: админ-панель", admin_panel_text(args, sheets, state), reply_markup=admin_keyboard())
+
+
+def send_admin_section(args, chat_id, section):
+    title_by_section = {
+        "monitoring": "TS26: мониторинг",
+        "access": "TS26: доступы",
+        "ae": "TS26: AE-ready",
+        "user_tools": "TS26: пользовательский вид",
+    }
+    send_admin_message(args, chat_id, title_by_section.get(section, "TS26: админ-панель"), admin_section_text(section), reply_markup=admin_keyboard(section))
 
 
 def send_test_to_sheet(args, chat_id, sheet, state=None):
-    message = "Тестовая отправка из debug-панели.\nПолучатели: {}".format(", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы")
+    message = "Тестовая отправка из админ-панели.\nПолучатели: {}".format(", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы")
     try:
         send_telegram(args, "TS26: тест уведомления", message, subtitle=sheet["label"], url=sheet["url"], sheet=sheet, state=state)
-        send_admin_message(args, chat_id, "TS26: тест отправлен", "Таблица: {}\nПолучатели: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы"), reply_markup=admin_keyboard())
+        send_admin_message(args, chat_id, "TS26: тест отправлен", "Таблица: {}\nПолучатели: {}".format(sheet["label"], ", ".join(recipient_chat_ids(sheet, state=state)) or "не заданы"), reply_markup=admin_keyboard("monitoring"))
     except (MonitorError, ConfigError) as exc:
-        send_admin_message(args, chat_id, "TS26: ошибка теста", "Таблица: {}\n{}".format(sheet["label"], exc), reply_markup=admin_keyboard())
+        send_admin_message(args, chat_id, "TS26: ошибка теста", "Таблица: {}\n{}".format(sheet["label"], exc), reply_markup=admin_keyboard("monitoring"))
 
 
 def start_screen_text(is_content_recipient=False, can_use_plaque=False):
     lines = [
-        "Я бот TS26.",
+        "Это бот TS26.",
         "",
-        "Что умею:",
-        "• присылать уведомления об изменениях в Контент-плане;",
+        "Что доступно вам:",
     ]
+    if is_content_recipient:
+        lines.append("• почасовые сводки изменений Контент-плана;")
+        lines.append("• полный diff по Контент-плану после сводки;")
+    else:
+        lines.append("• уведомления Контент-плана появятся, если админ добавит ваш chat_id;")
     if can_use_plaque:
         lines.extend(
             [
-                "• помочь добавить или обновить плашку для моушена;",
-                "• перед отправкой плашки показать проверку данных.",
+                "• добавление или обновление плашек для моушена;",
+                "• пакетная отправка нескольких плашек одним сообщением;",
+                "• проверка перед записью в таблицу.",
                 "",
-                "Чтобы добавить плашку, нажмите кнопку ниже.",
+                "Нажмите «Добавить плашку» внизу чата.",
             ]
         )
     else:
         lines.extend(
             [
-                "• принимать заявки на плашки только от пользователей с выданным доступом.",
                 "",
                 "Если вам нужен доступ к плашкам, напишите администратору.",
             ]
         )
-    if is_content_recipient:
-        lines.extend(["", "Вы добавлены в уведомления Контент-плана."])
     return "\n".join(lines)
 
 
@@ -1580,7 +1664,7 @@ def send_plaque_preview(args, chat_id):
     send_plain_chat_message(args, chat_id, "TS26: новая плашка", "Введите должность для плашки.")
     preview_state = {"_plaque_sessions": {str(chat_id): {"name": "Иванов Иван", "position": "директор подразделения"}}}
     send_plaque_confirmation(args, preview_state, chat_id)
-    send_plain_chat_message(args, chat_id, "TS26: готово", "После подтверждения пользователь увидит примерно так:\n\nПлашка добавлена.\nСтрока: 280\nФИО: Иванов Иван\nДолжность: директор подразделения", reply_markup=admin_keyboard())
+    send_plain_chat_message(args, chat_id, "TS26: готово", "После подтверждения пользователь увидит примерно так:\n\nПлашка добавлена.\nИванов Иван — директор подразделения", reply_markup=admin_keyboard("user_tools"))
 
 
 def send_user_mode_start(args, state, chat_id):
@@ -1590,7 +1674,7 @@ def send_user_mode_start(args, state, chat_id):
         args,
         chat_id,
         "TS26: режим пользователя",
-        "Теперь этот чат работает как обычный пользователь формы. Можно пройти сценарий полностью, включая запись в Google Sheet после подтверждения.\n\nЧтобы вернуться в debug-панель, нажмите кнопку или отправьте /debug.",
+        "Теперь этот чат работает как обычный пользователь формы. Можно пройти сценарий полностью, включая запись в Google Sheet после подтверждения.\n\nЧтобы вернуться в админ-панель, нажмите кнопку или отправьте /debug.",
     )
     send_plaque_start(args, chat_id, state=state)
 
@@ -1627,31 +1711,41 @@ def handle_admin_callback(args, sheets, state, callback):
         answer_callback(args, callback_id, "Нет доступа")
         return False
     answer_callback(args, callback_id)
-    if data == "dbg:status":
-        send_admin_message(args, chat_id, "TS26: статус", status_report(args, sheets, state), reply_markup=admin_keyboard())
+    if data == "dbg:home":
+        send_debug_menu(args, chat_id, sheets, state)
+    elif data.startswith("dbg:menu:"):
+        section = data.rsplit(":", 1)[-1]
+        send_admin_section(args, chat_id, section)
+    elif data == "dbg:status":
+        send_admin_message(args, chat_id, "TS26: статус", status_report(args, sheets, state), reply_markup=admin_keyboard("monitoring"))
     elif data == "dbg:recipients":
-        send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets, state=state), reply_markup=admin_keyboard())
+        send_admin_message(args, chat_id, "TS26: получатели", recipients_report(sheets, state=state), reply_markup=admin_keyboard("monitoring"))
     elif data == "dbg:content_access":
-        send_admin_message(args, chat_id, "TS26: Контент-доступ", content_access_report(state), reply_markup=admin_keyboard())
+        send_admin_message(args, chat_id, "TS26: Контент-доступ", content_access_report(state), reply_markup=admin_keyboard("access"))
     elif data == "dbg:plaque_access":
-        send_admin_message(args, chat_id, "TS26: доступ к плашкам", plaque_access_report(state), reply_markup=admin_keyboard())
+        send_admin_message(args, chat_id, "TS26: доступ к плашкам", plaque_access_report(state), reply_markup=admin_keyboard("access"))
     elif data == "dbg:ae_status":
-        send_admin_message(args, chat_id, "TS26: AE-ready статус", ae_status_report(state), reply_markup=admin_keyboard())
+        send_admin_message(args, chat_id, "TS26: AE-ready статус", ae_status_report(state), reply_markup=admin_keyboard("ae"))
+    elif data == "dbg:ae_link":
+        spreadsheet_id = ae_ready_spreadsheet_id(state)
+        send_admin_message(args, chat_id, "TS26: AE-ready ссылка", ae_ready_url(spreadsheet_id) if spreadsheet_id else "AE-ready таблица еще не создана. Запустите sync.", reply_markup=admin_keyboard("ae"))
+    elif data == "dbg:ae_warnings":
+        send_admin_message(args, chat_id, "TS26: AE-ready warnings", ae_warnings_report(state), reply_markup=admin_keyboard("ae"))
     elif data == "dbg:ae_sync":
         try:
             result = run_ae_ready_sync(args, state, force=True, rebuild=False)
-            send_admin_message(args, chat_id, "TS26: AE-ready sync", "{}\n{}".format(result["message"], ae_ready_url(result.get("spreadsheet_id"))), reply_markup=admin_keyboard())
+            send_admin_message(args, chat_id, "TS26: AE-ready sync", "{}\n{}".format(result["message"], ae_ready_url(result.get("spreadsheet_id"))), reply_markup=admin_keyboard("ae"))
         except (MonitorError, ConfigError, ae_content_plan.AEContentPlanError) as exc:
-            send_admin_message(args, chat_id, "TS26: ошибка AE-ready", str(exc), reply_markup=admin_keyboard())
+            send_admin_message(args, chat_id, "TS26: ошибка AE-ready", str(exc), reply_markup=admin_keyboard("ae"))
     elif data == "dbg:test:startup":
         send_startup_message(args, sheets, state=state)
-        send_admin_message(args, chat_id, "TS26: тест старта", "Стартовое сообщение отправлено основным получателям.", reply_markup=admin_keyboard())
+        send_admin_message(args, chat_id, "TS26: тест старта", "Стартовое сообщение отправлено основным получателям.", reply_markup=admin_keyboard("monitoring"))
     elif data == "dbg:google_access":
         try:
             report = google_access_report()
-            send_admin_message(args, chat_id, "TS26: Google-доступ", report, reply_markup=admin_keyboard())
+            send_admin_message(args, chat_id, "TS26: Google-доступ", report, reply_markup=admin_keyboard("monitoring"))
         except (MonitorError, ConfigError) as exc:
-            send_admin_message(args, chat_id, "TS26: ошибка Google-доступа", str(exc), reply_markup=admin_keyboard())
+            send_admin_message(args, chat_id, "TS26: ошибка Google-доступа", str(exc), reply_markup=admin_keyboard("monitoring"))
     elif data == "dbg:preview_plaque":
         send_plaque_preview(args, chat_id)
     elif data == "dbg:start_screen":
@@ -1670,7 +1764,7 @@ def handle_admin_callback(args, sheets, state, callback):
         if sheet:
             send_test_to_sheet(args, chat_id, sheet, state=state)
         else:
-            send_admin_message(args, chat_id, "TS26: ошибка", "Не нашел таблицу: {}".format(label), reply_markup=admin_keyboard())
+            send_admin_message(args, chat_id, "TS26: ошибка", "Не нашел таблицу: {}".format(label), reply_markup=admin_keyboard("monitoring"))
     else:
         send_debug_menu(args, chat_id, sheets, state)
     return True
@@ -1694,7 +1788,7 @@ def handle_admin_message(args, sheets, state, message):
         send_user_mode_start(args, state, chat_id)
         ask_plaque_name(args, state, chat_id)
         return True
-    if command in {"/start", "/debug"}:
+    if command in {"/start", "/debug", "/admin", "/help"}:
         if is_user_mode_chat(state, chat_id):
             set_user_mode_chat(state, chat_id, False)
             clear_plaque_session(state, chat_id)
@@ -2840,7 +2934,7 @@ def handle_plaque_message(args, sheets, state, message):
     if not chat_id or not text:
         return False
     command = text.split()[0].split("@", 1)[0].lower() if text.startswith("/") else ""
-    if command == "/start":
+    if command in {"/start", "/help"} or text.casefold() == HELP_BUTTON_TEXT.casefold():
         clear_plaque_session(state, chat_id)
         allowed = can_use_plaque_form(sheets, state, chat_id)
         send_start_screen(
