@@ -190,12 +190,27 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(records["badges"][0]["МОУШЕН_ГОТОВО"], "0")
 
     def test_sync_skips_when_source_hash_unchanged(self):
-        state = {monitor.AE_READY_STATE_KEY: {"source_hash": "same", "spreadsheet_id": "ae123"}}
-        with mock.patch.object(monitor, "fetch_sheet", return_value={"hash": "same", "cells": [], "rows": 0, "bytes": 0}), mock.patch.object(monitor, "get_google_client") as google:
+        state = {monitor.AE_READY_STATE_KEY: {"source_hash": "same", "reference_hash": "same-reference", "spreadsheet_id": "ae123"}}
+        source = {"hash": "same", "cells": [], "rows": 0, "bytes": 0}
+        reference = {"hash": "same-reference", "cells": [], "rows": 0, "bytes": 0}
+        with mock.patch.object(monitor, "fetch_sheet", side_effect=[source, reference]), mock.patch.object(monitor, "get_google_client") as google:
             result = monitor.run_ae_ready_sync(self.args, state, force=False)
 
         self.assertFalse(result["changed"])
         google.assert_not_called()
+
+    def test_reference_change_rebuilds_ae_ready_when_source_is_unchanged(self):
+        client = FakeClient()
+        rows = ae_content_plan.parse_table_rows(SAMPLE_TSV)
+        current = {"hash": "same-source", "cells": rows, "rows": len(rows), "bytes": len(SAMPLE_TSV)}
+        reference = {"hash": "new-reference", "cells": [["№", "ФИО спикера", "Должность"], ["1", "Иванов Иван", "Согласованная должность"]]}
+        state = {monitor.AE_READY_STATE_KEY: {"source_hash": "same-source", "reference_hash": "old-reference", "spreadsheet_id": "ae123"}}
+
+        with mock.patch.object(monitor, "fetch_sheet", side_effect=[current, reference]), mock.patch.object(monitor, "get_google_client", return_value=client), mock.patch.object(monitor, "build_ae_llm_corrector", return_value=None), mock.patch.object(monitor, "sync_ae_ready_badges_to_motion_sheet", return_value={"synced": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}):
+            result = monitor.run_ae_ready_sync(self.args, state, force=False)
+
+        self.assertTrue(result["changed"])
+        self.assertEqual("new-reference", state[monitor.AE_READY_STATE_KEY]["reference_hash"])
 
     def test_sync_creates_private_sheet_and_writes_tabs(self):
         client = FakeClient()

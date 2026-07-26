@@ -2238,6 +2238,7 @@ def ae_status_report(state):
         "Источник: {}".format(ae_ready_source_url(state)),
         "Последний sync: {}".format(data.get("last_synced_at") or "не было"),
         "Source hash: {}".format(data.get("source_hash") or "нет"),
+        "Reference hash: {}".format(data.get("reference_hash") or "нет"),
         "Data hash: {}".format(data.get("data_hash") or "нет"),
         "Сессии: {}".format(data.get("sessions") or 0),
         "Люди: {}".format(data.get("unique_people") or 0),
@@ -2413,10 +2414,10 @@ def run_ae_ready_sync(args, state, force=False, rebuild=False):
     source_url = ae_ready_source_url(state)
     source_sheet = {"label": "Контент-план", "url": source_url}
     current = fetch_sheet(source_url, args.timeout)
-    data = ae_ready_state(state)
-    if not force and data.get("source_hash") == current["hash"]:
-        return {"changed": False, "message": "AE-ready таблица уже актуальна.", "spreadsheet_id": ae_ready_spreadsheet_id(state)}
     reference_sheet = fetch_sheet(AE_POSITION_REFERENCE_URL, args.timeout)
+    data = ae_ready_state(state)
+    if not force and data.get("source_hash") == current["hash"] and data.get("reference_hash") == reference_sheet["hash"]:
+        return {"changed": False, "message": "AE-ready таблица уже актуальна.", "spreadsheet_id": ae_ready_spreadsheet_id(state)}
     position_reference = position_reference_from_sheet(reference_sheet)
     corrector = build_ae_llm_corrector(args)
     records = ae_content_plan.build_records(
@@ -2437,6 +2438,7 @@ def run_ae_ready_sync(args, state, force=False, rebuild=False):
         "spreadsheet_id": spreadsheet_id,
         "source_url": source_sheet["url"],
         "source_hash": current["hash"],
+        "reference_hash": reference_sheet["hash"],
         "data_hash": data_hash,
         "last_synced_at": now_text(),
         "sessions": report.get("sessions_found", 0),
