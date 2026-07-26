@@ -1852,6 +1852,183 @@ def send_plaque_confirmation(args, state, chat_id):
     send_plain_chat_message(args, chat_id, "TS26: проверьте плашку", message, reply_markup=keyboard)
 
 
+def a1_quote_sheet_title(title):
+    return "'{}'".format(str(title).replace("'", "''"))
+
+
+def google_api_json_request(method, url, access_token=None, payload=None, timeout=30):
+    headers = {"Accept": "application/json"}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json; charset=utf-8"
+    if access_token:
+        headers["Authorization"] = "Bearer {}".format(access_token)
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ConfigError("Google API HTTP {}: {}".format(exc.code, body[:1000]))
+    if not body:
+        return {}
+    try:
+        return json.loads(body)
+    except ValueError as exc:
+        raise ConfigError("Google API вернул не JSON: {}".format(exc))
+
+
+class GoogleOAuthRestClient:
+    """Small Google Sheets/Drive client for hosts without gspread/google-auth."""
+
+    def __init__(self, info, timeout=30):
+        self.info = dict(info)
+        self.timeout = timeout
+        self.access_token = self.info.get("token", "")
+
+    def refresh_access_token(self):
+        token_uri = self.info.get("token_uri") or "https://oauth2.googleapis.com/token"
+        body = urllib.parse.urlencode(
+            {
+                "client_id": self.info.get("client_id", ""),
+                "client_secret": self.info.get("client_secret", ""),
+                "refresh_token": self.info.get("refresh_token", ""),
+                "grant_type": "refresh_token",
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            token_uri,
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise ConfigError("Не удалось обновить Google OAuth token: HTTP {} {}".format(exc.code, body[:1000]))
+        except (OSError, ValueError) as exc:
+            raise ConfigError("Не удалось обновить Google OAuth token: {}".format(exc))
+        token = data.get("access_token")
+        if not token:
+            raise ConfigError("Google OAuth не вернул access_token.")
+        self.access_token = token
+        return token
+
+    def request(self, method, url, payload=None):
+        if not self.access_token:
+            self.refresh_access_token()
+        try:
+            return google_api_json_request(method, url, access_token=self.access_token, payload=payload, timeout=self.timeout)
+        except ConfigError as exc:
+            if "HTTP 401" not in str(exc):
+                raise
+            self.refresh_access_token()
+            return google_api_json_request(method, url, access_token=self.access_token, payload=payload, timeout=self.timeout)
+
+    def open_by_key(self, spreadsheet_id):
+        return GoogleRestSpreadsheet(self, spreadsheet_id)
+
+    def create(self, title):
+        data = self.request("POST", "https://sheets.googleapis.com/v4/spreadsheets", {"properties": {"title": title}})
+        spreadsheet_id = data.get("spreadsheetId")
+        if not spreadsheet_id:
+            raise ConfigError("Google Sheets API не вернул spreadsheetId при создании таблицы.")
+        return GoogleRestSpreadsheet(self, spreadsheet_id, metadata=data)
+
+
+class GoogleRestSpreadsheet:
+    def __init__(self, client, spreadsheet_id, metadata=None):
+        self.client = client
+        self.id = spreadsheet_id
+        self.spreadsheet_id = spreadsheet_id
+        self._metadata = metadata
+
+    def metadata(self, refresh=False):
+        if self._metadata is None or refresh:
+            url = "https://sheets.googleapis.com/v4/spreadsheets/{}?includeGridData=false".format(urllib.parse.quote(self.id))
+            self._metadata = self.client.request("GET", url)
+        return self._metadata
+
+    def worksheets(self):
+        sheets = self.metadata(refresh=True).get("sheets") or []
+        return [GoogleRestWorksheet(self, sheet.get("properties") or {}) for sheet in sheets]
+
+    def worksheet(self, title):
+        wanted = str(title)
+        for worksheet in self.worksheets():
+            if worksheet.title == wanted:
+                return worksheet
+        raise ConfigError("Не найден лист '{}'.".format(title))
+
+    def add_worksheet(self, title, rows=100, cols=20):
+        url = "https://sheets.googleapis.com/v4/spreadsheets/{}:batchUpdate".format(urllib.parse.quote(self.id))
+        payload = {
+            "requests": [
+                {
+                    "addSheet": {
+                        "properties": {
+                            "title": title,
+                            "gridProperties": {"rowCount": int(rows), "columnCount": int(cols)},
+                        }
+                    }
+                }
+            ]
+        }
+        data = self.client.request("POST", url, payload)
+        properties = ((data.get("replies") or [{}])[0].get("addSheet") or {}).get("properties") or {}
+        self.metadata(refresh=True)
+        return GoogleRestWorksheet(self, properties or {"title": title})
+
+    def share(self, email, perm_type="user", role="writer"):
+        url = "https://www.googleapis.com/drive/v3/files/{}/permissions?sendNotificationEmail=false".format(urllib.parse.quote(self.id))
+        return self.client.request("POST", url, {"type": perm_type, "role": role, "emailAddress": email})
+
+
+class GoogleRestWorksheet:
+    def __init__(self, spreadsheet, properties):
+        self.spreadsheet = spreadsheet
+        self.title = properties.get("title", "")
+        self.id = properties.get("sheetId", "")
+
+    def values_url(self, range_name, query=None):
+        encoded_range = urllib.parse.quote(range_name, safe="")
+        url = "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}".format(urllib.parse.quote(self.spreadsheet.id), encoded_range)
+        if query:
+            url = "{}?{}".format(url, urllib.parse.urlencode(query))
+        return url
+
+    def get_all_values(self):
+        data = self.spreadsheet.client.request("GET", self.values_url(a1_quote_sheet_title(self.title)))
+        return data.get("values") or []
+
+    def row_values(self, row_index):
+        row = int(row_index)
+        data = self.spreadsheet.client.request("GET", self.values_url("{}!{}:{}".format(a1_quote_sheet_title(self.title), row, row)))
+        values = data.get("values") or []
+        return values[0] if values else []
+
+    def clear(self):
+        encoded_range = urllib.parse.quote("{}!A:ZZZ".format(a1_quote_sheet_title(self.title)), safe="")
+        url = "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}:clear".format(urllib.parse.quote(self.spreadsheet.id), encoded_range)
+        return self.spreadsheet.client.request("POST", url, {})
+
+    def update(self, values, value_input_option="USER_ENTERED"):
+        url = self.values_url("{}!A1".format(a1_quote_sheet_title(self.title)), {"valueInputOption": value_input_option})
+        return self.spreadsheet.client.request("PUT", url, {"range": "{}!A1".format(a1_quote_sheet_title(self.title)), "majorDimension": "ROWS", "values": values})
+
+    def batch_update(self, updates, value_input_option="USER_ENTERED"):
+        url = "https://sheets.googleapis.com/v4/spreadsheets/{}/values:batchUpdate".format(urllib.parse.quote(self.spreadsheet.id))
+        sheet_prefix = a1_quote_sheet_title(self.title)
+        data = []
+        for item in updates:
+            data.append({"range": "{}!{}".format(sheet_prefix, item["range"]), "values": item.get("values") or []})
+        payload = {"valueInputOption": value_input_option, "data": data}
+        return self.spreadsheet.client.request("POST", url, payload)
+
+
 def get_google_client(include_drive=False):
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
@@ -1859,15 +2036,22 @@ def get_google_client(include_drive=False):
     oauth_user_file = os.environ.get("GOOGLE_OAUTH_USER_FILE", "").strip()
     if not any([service_account_json, service_account_file, oauth_user_json, oauth_user_file]):
         raise ConfigError("Для записи в Google Sheets задайте GOOGLE_SERVICE_ACCOUNT_JSON/FILE или GOOGLE_OAUTH_USER_JSON/FILE.")
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    if include_drive:
+        scopes.append("https://www.googleapis.com/auth/drive.file")
     try:
         import gspread
         from google.oauth2.credentials import Credentials as UserCredentials
         from google.oauth2.service_account import Credentials
     except ImportError as exc:
-        raise ConfigError("Не установлены зависимости для Google Sheets. Проверьте requirements.txt на хостинге: {}".format(exc))
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    if include_drive:
-        scopes.append("https://www.googleapis.com/auth/drive.file")
+        if oauth_user_json or oauth_user_file:
+            try:
+                info = json.loads(oauth_user_json) if oauth_user_json else json.loads(Path(oauth_user_file).expanduser().read_text(encoding="utf-8"))
+            except (OSError, ValueError) as json_exc:
+                raise ConfigError("GOOGLE_OAUTH_USER_JSON/FILE не похож на JSON: {}".format(json_exc))
+            log("gspread/google-auth недоступны, использую встроенный Google Sheets REST-клиент: {}".format(exc))
+            return GoogleOAuthRestClient(info)
+        raise ConfigError("Не установлены зависимости для Google Sheets, а stdlib fallback поддерживает только GOOGLE_OAUTH_USER_JSON/FILE. Проверьте requirements.txt на хостинге: {}".format(exc))
     if oauth_user_json:
         try:
             info = json.loads(oauth_user_json)

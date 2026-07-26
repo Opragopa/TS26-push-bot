@@ -21,6 +21,11 @@ class RuntimeBootstrapTests(unittest.TestCase):
         self.assertIn("install", command)
         self.assertIn("requirements.txt", command[-1])
 
+    def test_dependency_bootstrap_continues_when_pip_is_missing(self):
+        with mock.patch.object(runtime_bootstrap, "missing_runtime_modules", return_value=["gspread"]), mock.patch.object(runtime_bootstrap.subprocess, "check_call", side_effect=runtime_bootstrap.subprocess.CalledProcessError(1, ["python", "-m", "pip"])):
+            changed = runtime_bootstrap.ensure_runtime_dependencies()
+        self.assertFalse(changed)
+
 
 if __name__ == "__main__":
     unittest.main()

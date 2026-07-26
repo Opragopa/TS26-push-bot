@@ -1,5 +1,6 @@
 import datetime as dt
 import os
+import sys
 import tempfile
 import types
 import unittest
@@ -35,6 +36,40 @@ class HourlyContentPlanTests(unittest.TestCase):
             timezone = monitor.load_time_zone("Europe/Amsterdam", 1)
         self.assertEqual(timezone.utcoffset(None), dt.timedelta(hours=1))
         self.assertEqual(timezone.tzname(None), "Europe/Amsterdam")
+
+    def test_google_client_falls_back_to_rest_for_oauth_without_gspread(self):
+        old_oauth = os.environ.get("GOOGLE_OAUTH_USER_JSON")
+        old_service = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+        os.environ["GOOGLE_OAUTH_USER_JSON"] = '{"client_id":"id","client_secret":"secret","refresh_token":"refresh","type":"authorized_user"}'
+        os.environ.pop("GOOGLE_SERVICE_ACCOUNT_JSON", None)
+        try:
+            with mock.patch.dict(sys.modules, {"gspread": None}):
+                client = monitor.get_google_client()
+        finally:
+            if old_oauth is None:
+                os.environ.pop("GOOGLE_OAUTH_USER_JSON", None)
+            else:
+                os.environ["GOOGLE_OAUTH_USER_JSON"] = old_oauth
+            if old_service is None:
+                os.environ.pop("GOOGLE_SERVICE_ACCOUNT_JSON", None)
+            else:
+                os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"] = old_service
+        self.assertIsInstance(client, monitor.GoogleOAuthRestClient)
+
+    def test_rest_worksheet_batch_update_uses_sheet_title_prefix(self):
+        requests = []
+
+        class FakeClient:
+            def request(self, method, url, payload=None):
+                requests.append((method, url, payload))
+                return {}
+
+        spreadsheet = monitor.GoogleRestSpreadsheet(FakeClient(), "spreadsheet-id", metadata={"sheets": []})
+        worksheet = monitor.GoogleRestWorksheet(spreadsheet, {"title": "МОУШЕН", "sheetId": 123})
+        worksheet.batch_update([{"range": "A280", "values": [["Иванов Иван"]]}])
+        self.assertEqual(requests[0][0], "POST")
+        self.assertIn("/values:batchUpdate", requests[0][1])
+        self.assertEqual(requests[0][2]["data"][0]["range"], "'МОУШЕН'!A280")
 
     def test_queue_survives_state_save_and_load(self):
         state = {}

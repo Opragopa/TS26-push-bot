@@ -42,9 +42,14 @@ def ensure_runtime_dependencies():
         "[bootstrap] Missing Python dependencies: {}. Installing requirements.txt...".format(", ".join(missing)),
         flush=True,
     )
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", str(requirements_path)])
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", str(requirements_path)])
+    except subprocess.CalledProcessError as exc:
+        print("[bootstrap] Could not run pip install: {}. Continuing with stdlib fallbacks when available.".format(exc), flush=True)
+        return False
     still_missing = missing_runtime_modules()
     if still_missing:
-        raise ModuleNotFoundError("Could not install runtime dependencies: {}".format(", ".join(still_missing)))
+        print("[bootstrap] Dependencies still missing: {}. Continuing with stdlib fallbacks when available.".format(", ".join(still_missing)), flush=True)
+        return False
     print("[bootstrap] Python dependencies installed.", flush=True)
     return True
