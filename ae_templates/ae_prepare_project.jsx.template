@@ -67,6 +67,7 @@
     }
 
     function configureRenderQueue(comp, params) {
+        if (app.project.renderQueue.rendering === true) fail("After Effects уже рендерит; Render Queue не трогаю.");
         while (app.project.renderQueue.numItems > 0) app.project.renderQueue.item(1).remove();
         var renderItem = app.project.renderQueue.items.add(comp);
         if (params.render_settings_template) renderItem.applyTemplate(params.render_settings_template);
@@ -76,6 +77,7 @@
     }
 
     function clearRenderQueue() {
+        if (app.project.renderQueue.rendering === true) fail("After Effects уже рендерит; Render Queue не трогаю.");
         while (app.project.renderQueue.numItems > 0) app.project.renderQueue.item(1).remove();
     }
 
@@ -135,6 +137,50 @@
         return renderItem.comp;
     }
 
+    function generateSessionTopic(params) {
+        var generator = new File(params.session_topics_script_path);
+        if (!generator.exists) fail("Не найден генератор тем сессий: " + generator.fsName);
+
+        var templateComp = findSessionComp(params.session_comp_pattern, params.session_shift);
+        if (!templateComp) fail("Не найдена шаблонная композиция для смены '" + params.session_shift + "'.");
+
+        clearRenderQueue();
+        $.global.__sheet2compSessionTopicsPreset = {
+            autoRun: true,
+            autoConfirm: true,
+            sourceMode: "file",
+            filePath: params.session_topic_tsv_path,
+            delimiter: "\t",
+            programMode: false,
+            mainCompName: templateComp.name,
+            titleLayerName: params.topic_layer,
+            descLayerName: params.description_layer,
+            titleColumnName: params.topic_layer,
+            descColumnName: params.description_layer,
+            namePrefix: "",
+            addToRenderQueue: true,
+            addExistingToRenderQueue: true,
+            outputModuleTemplate: params.output_module_template,
+            routeByShiftDay: true,
+            topicsRootPath: params.session_topic_target_folder_path || "!_COMPS/02_ЗАСТАВКА С ТЕМОЙ СЕССИИ",
+            shiftName: params.shift,
+            saveExtractedTsv: false
+        };
+        $.evalFile(generator);
+
+        if (app.project.renderQueue.numItems !== 1) {
+            fail("Генератор тем должен добавить ровно одну композицию в Render Queue, добавлено: " + app.project.renderQueue.numItems + ".");
+        }
+        var renderItem = app.project.renderQueue.item(1);
+        if (params.render_settings_template) renderItem.applyTemplate(params.render_settings_template);
+        for (var index = 1; index <= renderItem.numOutputModules; index++) {
+            var outputModule = renderItem.outputModule(index);
+            if (params.output_module_template) outputModule.applyTemplate(params.output_module_template);
+            outputModule.file = new File(params.output_path);
+        }
+        return renderItem.comp;
+    }
+
     var paramsPath = typeof __PARAMS_PATH__ === "undefined" ? "" : __PARAMS_PATH__;
 
     function writeFailure(message) {
@@ -156,11 +202,10 @@
         var comp;
         if (params.kind === "plaque") {
             comp = generatePlaque(params);
+        } else if (params.kind === "session_topic") {
+            comp = generateSessionTopic(params);
         } else {
-            comp = findSessionComp(params.session_comp_pattern, params.session_shift);
-            if (!comp) fail("Не найдена композиция для задания '" + params.kind + "'.");
-            setTextLayers(comp, params.text_layers);
-            configureRenderQueue(comp, params);
+            fail("Для задания '" + params.kind + "' не настроена подготовка.");
         }
         if (!comp) fail("Не найдена композиция для задания '" + params.kind + "'.");
         writeText(new File(params.prepared_comp_name_path), comp.name);

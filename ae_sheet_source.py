@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from pathlib import Path
 
 import gspread
@@ -13,6 +14,7 @@ from google.oauth2.credentials import Credentials as UserCredentials
 from google.oauth2.service_account import Credentials as ServiceCredentials
 
 import ae_render_queue
+import ae_render_registry
 
 
 SCOPES = [
@@ -51,6 +53,26 @@ def auth_client(config):
     return gspread.authorize(credentials)
 
 
+def ae_ready_spreadsheet_id(config):
+    explicit = str(config.get("ae_ready_spreadsheet_id") or os.environ.get("AE_READY_SPREADSHEET_ID", "")).strip()
+    if explicit:
+        return explicit
+    state_path = str(config.get("ae_ready_state_path", "")).strip()
+    if not state_path:
+        return ""
+    path = Path(state_path).expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    if not path.exists():
+        return ""
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    data = state.get("_ae_ready_content_plan") or {}
+    return str(data.get("spreadsheet_id") or "").strip()
+
+
 def worksheet_by_gid(spreadsheet, gid):
     for worksheet in spreadsheet.worksheets():
         if worksheet.id == int(gid):
@@ -67,6 +89,32 @@ def fingerprint(*parts):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def configured_shift_by_day(config):
+    candidates = (
+        config.get("shift_by_day") or {},
+        config.get("templates", {}).get("session_topic", {}).get("shift_by_day", {}) or {},
+    )
+    for shifts in candidates:
+        if any(normalize(value) for value in shifts.values()):
+            return shifts
+    return {}
+
+
+def stable_fallback_plaque_id(name, position):
+    return "content-" + fingerprint(name, position)
+
+
+def plaque_row_id(worksheet, row_number, row, ae_id_col, name, position):
+    if ae_id_col <= 0:
+        return stable_fallback_plaque_id(name, position)
+    existing = normalize(value(row, ae_id_col))
+    if existing:
+        return existing
+    new_id = "ae-" + uuid.uuid4().hex[:16]
+    worksheet.update_cell(row_number, ae_id_col, new_id)
+    return new_id
+
+
 def enqueue_plaque_jobs(client, config):
     spreadsheet = client.open_by_key(config["plaque_spreadsheet_id"])
     worksheet = worksheet_by_gid(spreadsheet, config["plaque_worksheet_gid"])
@@ -75,23 +123,49 @@ def enqueue_plaque_jobs(client, config):
     name_col = int(config.get("plaque_name_col", 1))
     position_col = int(config.get("plaque_position_col", 2))
     note_col = int(config.get("plaque_note_col", 5))
+    ae_id_col = int(config.get("plaque_ae_id_col", 0) or 0)
     note_text = normalize(config.get("plaque_note_text", "<-- добавлено через ТГ бота"))
     created = 0
+    active_ids = set()
     for row_number, row in enumerate(rows[start - 1 :], start=start):
         name = normalize(value(row, name_col))
         position = normalize(value(row, position_col))
         note = normalize(value(row, note_col))
         if not name or not position or note_text and note != note_text:
             continue
-        key = "sheet-plaque:{}:{}:{}".format(worksheet.id, row_number, fingerprint(name, position))
+        ae_id = plaque_row_id(worksheet, row_number, row, ae_id_col, name, position)
+        active_ids.add(ae_id)
+        key = "sheet-plaque:{}:{}:{}".format(worksheet.id, ae_id, fingerprint(name, position))
         _, was_created = ae_render_queue.enqueue(
             config["queue_path"],
             "plaque",
-            {"name": name, "position": position, "sheet_row": row_number},
+            {"name": name, "position": position, "sheet_row": row_number, "ae_id": ae_id},
             source_key=key,
         )
         created += int(was_created)
-    return created
+    return {"created": created, "active_ids": active_ids}
+
+
+def sync_missing_plaques(config, active_ids):
+    mode = str(config.get("delete_missing_plaques", "archive")).strip().lower()
+    if mode in {"", "off", "false", "0", "none"}:
+        return {"active": len(active_ids), "archived": 0, "missing": 0}
+    if mode not in {"archive"}:
+        raise RuntimeError("delete_missing_plaques поддерживает только 'off' или 'archive'")
+    if not active_ids and config.get("allow_archive_all_plaques") is not True:
+        return {"active": 0, "archived": 0, "missing": 0, "skipped": "empty_active_set"}
+    result = ae_render_registry.archive_missing_plaques(
+        config["registry_path"],
+        active_ids,
+        config.get("deleted_plaque_archive_dir", "_Удаленные AE"),
+        dry_run=config.get("sync_dry_run") is True,
+    )
+    return {
+        "active": len(active_ids),
+        "archived": len(result["dry_run"] if result.get("dry_run") else result["moved"]),
+        "missing": len(result["missing"]),
+        "dry_run": bool(config.get("sync_dry_run") is True),
+    }
 
 
 def enqueue_session_jobs(client, config):
@@ -105,7 +179,7 @@ def enqueue_session_jobs(client, config):
     required = ("ДЕНЬ", "ТЕМА", "ОПИСАНИЕ", "ПЛОЩАДКА", "ИСХОДНАЯ_ЯЧЕЙКА")
     if any(name not in indexes for name in required):
         raise RuntimeError("В AE-ready не хватает колонок: {}".format(", ".join(name for name in required if name not in indexes)))
-    shifts = config.get("shift_by_day", {})
+    shifts = configured_shift_by_day(config)
     created = 0
     for row_number, row in enumerate(rows[1:], start=2):
         data = {name: normalize(row[indexes[name]] if len(row) > indexes[name] else "") for name in required}
@@ -127,7 +201,20 @@ def enqueue_session_jobs(client, config):
 
 def poll(config):
     client = auth_client(config)
+    plaque_result = enqueue_plaque_jobs(client, config)
+    session_topics = 0
+    session_error = ""
+    spreadsheet_id = ae_ready_spreadsheet_id(config)
+    if spreadsheet_id:
+        session_config = dict(config)
+        session_config["ae_ready_spreadsheet_id"] = spreadsheet_id
+        try:
+            session_topics = enqueue_session_jobs(client, session_config)
+        except Exception as exc:
+            session_error = str(exc)
     return {
-        "plaques": enqueue_plaque_jobs(client, config),
-        "session_topics": enqueue_session_jobs(client, config) if config.get("ae_ready_spreadsheet_id") else 0,
+        "plaques": plaque_result["created"],
+        "session_topics": session_topics,
+        "session_error": session_error,
+        "plaque_sync": sync_missing_plaques(config, plaque_result["active_ids"]),
     }

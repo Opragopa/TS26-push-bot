@@ -9,7 +9,13 @@
   "google_oauth_user_file": "/Users/opragopa/Documents/tg-pushes-TS26/google_oauth_user.json",
   "env_file": "/Users/opragopa/Documents/tg-pushes-TS26/.env",
   "queue_path": "data/ae_render_queue.json",
+  "registry_path": "data/ae_render_registry.json",
   "temp_project_dir": "/private/tmp/ts26-ae-render",
+  "delete_missing_plaques": "archive",
+  "deleted_plaque_archive_dir": "_Удаленные AE",
+  "stale_plaque_archive_dir": "_Устаревшие AE",
+  "respect_existing_render": true,
+  "busy_check_timeout_seconds": 5,
   "output_module_templates": {
     "session_topic": "DVX 3 no audio",
     "plaque": "High Quality with Alpha",
@@ -18,6 +24,7 @@
   "render_settings_template": "",
   "prepare_timeout_seconds": 180,
   "person_plates_script_path": "/Users/opragopa/PYTHON_PROJECTS/sheet2comp-ae/person_plates_from_sheet.jsx",
+  "session_topics_script_path": "/Users/opragopa/PYTHON_PROJECTS/sheet2comp-ae/session_topics_from_sheet.jsx",
   "routes": {
     "session_topics_root": "/Users/opragopa/Yandex.Disk.localized/Оперативная графика ТС 2026/ГРАФИКА/ТЕМЫ СЕССИЙ",
     "plaque_output_dir": "/Users/opragopa/Yandex.Disk.localized/Заставки ТС 2026/Трансляция/Динамика/04_ПЛАШКИ/Запись",
@@ -34,6 +41,7 @@
       "comp_pattern": "{shift}_.*Заставка с темами_.*альт",
       "topic_layer": "ТЕМА",
       "description_layer": "ОПИСАНИЕ",
+      "target_folder_path": "!_COMPS/02_ЗАСТАВКА С ТЕМОЙ СЕССИИ",
       "shift_by_day": {
         "1": "ЕДИНСТВО",
         "2": "ПРАВДА",
@@ -49,8 +57,10 @@
   "plaque_name_col": 1,
   "plaque_position_col": 2,
   "plaque_note_col": 5,
+  "plaque_ae_id_col": 0,
   "plaque_note_text": "<-- добавлено через ТГ бота",
   "ae_ready_spreadsheet_id": "",
+  "ae_ready_state_path": "data/sheet_state.json",
   "ae_ready_sessions_worksheet": "content_plan_sessions",
   "shift_by_day": {
     "1": "",

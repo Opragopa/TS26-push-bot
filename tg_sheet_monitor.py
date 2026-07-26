@@ -87,6 +87,8 @@ PLAQUE_POSITION_COL = int(os.environ.get("PLAQUE_POSITION_COL", "2"))
 PLAQUE_NOTE_COL = int(os.environ.get("PLAQUE_NOTE_COL", "5"))
 PLAQUE_NOTE_TEXT = os.environ.get("PLAQUE_NOTE_TEXT", "<-- добавлено через ТГ бота")
 AE_RENDER_ENABLED = env_bool("AE_RENDER_ENABLED", True)
+AE_RENDER_TRIGGER_URL = os.environ.get("AE_RENDER_TRIGGER_URL", "").strip()
+AE_RENDER_TRIGGER_TOKEN = os.environ.get("AE_RENDER_TRIGGER_TOKEN", "").strip()
 _ae_render_queue_value = Path(os.environ.get("AE_RENDER_QUEUE_PATH", "data/ae_render_queue.json")).expanduser()
 AE_RENDER_QUEUE_PATH = _ae_render_queue_value if _ae_render_queue_value.is_absolute() else Path(__file__).resolve().parent / _ae_render_queue_value
 KEY_COLUMN_CANDIDATES = (
@@ -2428,6 +2430,40 @@ def write_plaque_to_sheet(name, position):
 def enqueue_plaque_render(name, position, result):
     if not AE_RENDER_ENABLED:
         return {"status": "disabled"}
+    if AE_RENDER_TRIGGER_URL:
+        payload = {
+            "kind": "plaque",
+            "name": name,
+            "position": position,
+            "sheet_row": result["row"],
+            "source_key": "plaque:{}:{}".format(result["worksheet_gid"], result["row"]),
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            AE_RENDER_TRIGGER_URL,
+            data=body,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        if AE_RENDER_TRIGGER_TOKEN:
+            request.add_header("Authorization", "Bearer " + AE_RENDER_TRIGGER_TOKEN)
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            if data.get("ok"):
+                return {
+                    "status": data.get("status") or "queued",
+                    "job": {"id": data.get("job_id", ""), "status": data.get("job_status", "")},
+                    "queue_ahead": int(data.get("queue_ahead") or 0),
+                    "queued_total": int(data.get("queued_total") or 0),
+                    "preparing_total": int(data.get("preparing_total") or 0),
+                    "rendering_total": int(data.get("rendering_total") or 0),
+                    "renderer_busy": bool(data.get("renderer_busy")),
+                }
+            return {"status": "error", "error": data.get("error", "trigger rejected")}
+        except Exception as exc:
+            log("Не удалось вызвать AE render trigger: {}".format(exc))
+            return {"status": "error", "error": str(exc)}
     source_key = "plaque:{}:{}".format(result["worksheet_gid"], result["row"])
     try:
         job, created = ae_render_queue.enqueue(
@@ -2436,18 +2472,73 @@ def enqueue_plaque_render(name, position, result):
             {"name": name, "position": position, "sheet_row": result["row"]},
             source_key=source_key,
         )
-        return {"status": "queued" if created else "existing", "job": job}
+        render = {"status": "queued" if created else "existing", "job": job}
+        render.update(local_render_queue_status(job.get("id")))
+        return render
     except (OSError, ae_render_queue.RenderQueueError) as exc:
         log("Не удалось поставить плашку в очередь: {}".format(exc))
         return {"status": "error", "error": str(exc)}
 
 
+def local_render_queue_status(job_id):
+    try:
+        data = ae_render_queue.load_queue_unlocked(AE_RENDER_QUEUE_PATH)
+    except Exception:
+        return {}
+    active_statuses = {"queued", "preparing", "rendering"}
+    ahead = 0
+    found = None
+    counts = {}
+    for job in data.get("jobs", []):
+        status = job.get("status", "")
+        counts[status] = counts.get(status, 0) + 1
+        if job.get("id") == job_id:
+            found = job
+            continue
+        if found is None and status in active_statuses:
+            ahead += 1
+    if not found:
+        return {}
+    return {
+        "queue_ahead": ahead if found.get("status") in active_statuses else 0,
+        "queued_total": counts.get("queued", 0),
+        "preparing_total": counts.get("preparing", 0),
+        "rendering_total": counts.get("rendering", 0),
+    }
+
+
+def plural_ru(number, one, few, many):
+    number = abs(int(number))
+    if number % 100 in range(11, 15):
+        return many
+    if number % 10 == 1:
+        return one
+    if number % 10 in range(2, 5):
+        return few
+    return many
+
+
 def plaque_render_message(render):
     status = render.get("status") if isinstance(render, dict) else "error"
+    job = render.get("job") if isinstance(render.get("job"), dict) else {}
+    job_status = str(job.get("status") or render.get("job_status") or "").strip()
+    ahead = int(render.get("queue_ahead") or 0)
+    active_total = int(render.get("preparing_total") or 0) + int(render.get("rendering_total") or 0)
+    busy = bool(render.get("renderer_busy") or active_total)
     if status == "queued":
-        return "Рендер поставлен в очередь."
+        if ahead > 0 or busy:
+            word = plural_ru(ahead, "задание", "задания", "заданий")
+            if ahead > 0:
+                return "Рендер поставлен в очередь: перед ним {} {}. Файл появится автоматически, когда очередь дойдет до плашки.".format(ahead, word)
+            return "Рендер поставлен в очередь. Сейчас After Effects занят другим рендером, плашка начнется после него."
+        return "Рендер запускается сейчас. Обычно плашка готова быстро."
     if status == "existing":
-        return "Рендер уже был в очереди."
+        if job_status == "done":
+            return "Рендер этой плашки уже был выполнен."
+        if ahead > 0:
+            word = plural_ru(ahead, "задание", "задания", "заданий")
+            return "Рендер уже был в очереди: перед ним {} {}.".format(ahead, word)
+        return "Рендер уже был в очереди и скоро начнется."
     if status == "disabled":
         return "Автоматический рендер отключен."
     return "Плашка сохранена, но рендер не поставлен в очередь."
