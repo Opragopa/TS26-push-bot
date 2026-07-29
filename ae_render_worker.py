@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -31,6 +32,35 @@ class RenderWorkerError(Exception):
 
 class RenderWorkerBusy(Exception):
     pass
+
+
+def secure_workdir(path):
+    """Create/validate a scratch directory that only the current user can write.
+
+    After Effects executes JSX from this directory, so a world-writable location
+    (the default ``/private/tmp/...``) would let any local user swap in their own
+    script and get it run inside AE with this user's privileges. We create it 0700
+    and refuse to use one that is owned by somebody else or is group/world-writable.
+    """
+    directory = Path(path).expanduser()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        info = directory.lstat()
+    except OSError as exc:
+        raise RenderWorkerError("Не удалось проверить рабочую папку {}: {}".format(directory, exc))
+    if stat.S_ISLNK(info.st_mode):
+        raise RenderWorkerError("Рабочая папка {} — символическая ссылка; это небезопасно.".format(directory))
+    if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
+        raise RenderWorkerError(
+            "Рабочая папка {} принадлежит другому пользователю (uid={}). "
+            "Удалите её или укажите другой temp_project_dir.".format(directory, info.st_uid)
+        )
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        try:
+            directory.chmod(0o700)
+        except OSError as exc:
+            raise RenderWorkerError("Рабочая папка {} доступна на запись другим и не чинится: {}".format(directory, exc))
+    return directory
 
 
 def load_config(path):
@@ -230,8 +260,7 @@ def after_effects_render_queue_busy(config):
     bundle_id = str(config.get("afterfx_bundle_id", "com.adobe.AfterEffects.application")).strip()
     if not bundle_id:
         return False
-    check_dir = Path(config["temp_project_dir"]).expanduser() / "_busy_check"
-    check_dir.mkdir(parents=True, exist_ok=True)
+    check_dir = secure_workdir(Path(config["temp_project_dir"]).expanduser() / "_busy_check")
     script_path = check_dir / "check_render_busy.jsx"
     result_path = check_dir / "render_busy.txt"
     error_path = check_dir / "render_busy.error"
@@ -300,8 +329,7 @@ def active_project_path(config):
     """Read the currently open AE project without changing it."""
     if not process_exists("After Effects"):
         return ""
-    check_dir = Path(config["temp_project_dir"]).expanduser() / "_project_check"
-    check_dir.mkdir(parents=True, exist_ok=True)
+    check_dir = secure_workdir(Path(config["temp_project_dir"]).expanduser() / "_project_check")
     script_path = check_dir / "active_project.jsx"
     result_path = check_dir / "active_project.txt"
     error_path = check_dir / "active_project.error"
@@ -394,15 +422,27 @@ def render_open_queue(params_path, project_dir):
 
 def cleanup_job_dir(config, job):
     """Remove per-job scripts and staged media, leaving only the shared busy check."""
-    job_dir = Path(config["temp_project_dir"]).expanduser() / str(job["id"])
-    if job_dir.exists():
+    job_id = str(job.get("id") or "")
+    if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", job_id):
+        # Never hand an unvalidated component to rmtree.
+        return
+    root = Path(config["temp_project_dir"]).expanduser().resolve()
+    job_dir = (root / job_id).resolve()
+    if job_dir == root or root not in job_dir.parents:
+        return
+    if job_dir.is_dir() and not job_dir.is_symlink():
         shutil.rmtree(str(job_dir))
 
 
 def process_job(config, job):
     ensure_renderer_available(config)
-    project_dir = Path(config["temp_project_dir"]).expanduser() / job["id"]
-    project_dir.mkdir(parents=True, exist_ok=True)
+    secure_workdir(config["temp_project_dir"])
+    # job["id"] is a server-generated uuid4 hex, but validate anyway so a hand-edited
+    # queue file can never turn this into a path outside temp_project_dir.
+    job_id = str(job.get("id") or "")
+    if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", job_id):
+        raise RenderWorkerError("Некорректный id задания: {!r}".format(job_id))
+    project_dir = secure_workdir(Path(config["temp_project_dir"]).expanduser() / job_id)
     temporary_project = project_dir / "render.aep"
     staged_output_path = project_dir / "output.mov"
     params_path = project_dir / "params.json"

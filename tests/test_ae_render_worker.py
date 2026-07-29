@@ -239,17 +239,29 @@ class RenderWorkerPayloadTests(unittest.TestCase):
     def test_cleanup_job_dir_removes_only_job_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            job_dir = root / "job-1"
+            job_id = "abcdef1234567890"
+            job_dir = root / job_id
             job_dir.mkdir()
             (job_dir / "render.aep").write_text("temporary", encoding="utf-8")
             shared = root / "_busy_check"
             shared.mkdir()
             ae_render_worker.cleanup_job_dir(
                 {"temp_project_dir": str(root)},
-                {"id": "job-1"},
+                {"id": job_id},
             )
             self.assertFalse(job_dir.exists())
             self.assertTrue(shared.exists())
+
+    def test_cleanup_job_dir_ignores_untrusted_job_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            job_dir = root / "job-1"
+            job_dir.mkdir()
+            ae_render_worker.cleanup_job_dir(
+                {"temp_project_dir": str(root)},
+                {"id": "job-1"},
+            )
+            self.assertTrue(job_dir.exists())
 
 
 class RenderRegistryTests(unittest.TestCase):

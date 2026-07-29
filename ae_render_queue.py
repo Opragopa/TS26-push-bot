@@ -14,6 +14,19 @@ from pathlib import Path
 
 QUEUE_VERSION = 1
 DEFAULT_LEASE_SECONDS = 4 * 60 * 60
+ACTIVE_STATUSES = frozenset({"queued", "preparing", "rendering"})
+TERMINAL_STATUSES = frozenset({"done", "error", "cancelled"})
+# A failed job must still dedupe by default: otherwise the sheet poller recreates
+# the same broken render every minute. Callers can opt out with dedupe_statuses
+# when they intentionally implement a retry button.
+DEFAULT_DEDUPE_STATUSES = frozenset({"queued", "preparing", "rendering", "done", "error"})
+# For enqueues that come from a deliberate human action (bot confirmation, HTTP
+# trigger) rather than the periodic sheet poller. Re-submitting after a failure is
+# the user asking for a retry, so "error" must not suppress the new job.
+USER_RETRY_DEDUPE_STATUSES = frozenset({"queued", "preparing", "rendering", "done"})
+# Keep the queue file bounded; without this it grows for the lifetime of the deploy
+# and every enqueue/status call re-reads and re-writes the whole history.
+MAX_TERMINAL_JOBS = 500
 
 
 class RenderQueueError(Exception):
@@ -85,13 +98,25 @@ def locked_queue(queue_path):
     return queue_path, lock_stream
 
 
+def prune_terminal_jobs(data, keep=MAX_TERMINAL_JOBS):
+    """Drop the oldest finished jobs, keeping every active one."""
+    jobs = data.get("jobs") or []
+    terminal = [job for job in jobs if job.get("status") in TERMINAL_STATUSES]
+    if len(terminal) <= keep:
+        return 0
+    terminal.sort(key=lambda job: str(job.get("updated_at") or job.get("created_at") or ""))
+    drop = {id(job) for job in terminal[: len(terminal) - keep]}
+    data["jobs"] = [job for job in jobs if id(job) not in drop]
+    return len(drop)
+
+
 def enqueue(queue_path, kind, payload, source_key="", dedupe_statuses=None):
     queue_path, lock_stream = locked_queue(queue_path)
     try:
         data = load_queue_unlocked(queue_path)
         source_key = str(source_key or "").strip()
         if dedupe_statuses is None:
-            dedupe_statuses = {"queued", "preparing", "rendering", "done", "error"}
+            dedupe_statuses = set(DEFAULT_DEDUPE_STATUSES)
         else:
             dedupe_statuses = set(dedupe_statuses)
         if source_key:
@@ -108,6 +133,7 @@ def enqueue(queue_path, kind, payload, source_key="", dedupe_statuses=None):
             "updated_at": now_text(),
         }
         data["jobs"].append(job)
+        prune_terminal_jobs(data)
         save_queue_unlocked(queue_path, data)
         return job, True
     finally:

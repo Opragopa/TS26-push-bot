@@ -2602,11 +2602,29 @@ def ae_ready_state(state):
     return state[AE_READY_STATE_KEY]
 
 
+def spreadsheet_id_from_value(value):
+    """Accept either a bare spreadsheet id or a full Google Sheets URL.
+
+    AE_READY_SPREADSHEET_ID is routinely filled in with a copied browser URL, which
+    open_by_key() cannot use. ae_sheet_source.py already normalizes this; do the same
+    here so both sides agree on which spreadsheet is meant.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", urllib.parse.urlparse(text).path)
+    if match:
+        return match.group(1)
+    if text.startswith("http://") or text.startswith("https://"):
+        raise ConfigError("Не удалось извлечь ID таблицы из ссылки: {}".format(text))
+    return text
+
+
 def ae_ready_spreadsheet_id(state):
     explicit = os.environ.get("AE_READY_SPREADSHEET_ID", "").strip()
     if explicit:
-        return explicit
-    return str(ae_ready_state(state).get("spreadsheet_id") or "").strip()
+        return spreadsheet_id_from_value(explicit)
+    return spreadsheet_id_from_value(ae_ready_state(state).get("spreadsheet_id"))
 
 
 def ae_ready_source_url(state):
@@ -3074,6 +3092,7 @@ def enqueue_plaque_render(name, position, result):
             "plaque",
             {"name": name, "position": position, "sheet_row": result["row"]},
             source_key=source_key,
+            dedupe_statuses=ae_render_queue.USER_RETRY_DEDUPE_STATUSES,
         )
         render = {"status": "queued" if created else "existing", "job": job}
         render.update(local_render_queue_status(job.get("id")))
@@ -3154,16 +3173,24 @@ def confirm_plaque(args, state, chat_id):
     entries = session.get("entries")
     if isinstance(entries, list) and entries:
         results = []
+        failures = []
         for entry in entries:
-            result = write_plaque_to_sheet(entry["name"], entry["position"])
+            # Isolate each row: a failure on row 7 must not hide that rows 1-6 were
+            # already written, otherwise the user re-sends everything and duplicates.
+            try:
+                result = write_plaque_to_sheet(entry["name"], entry["position"])
+            except (MonitorError, ConfigError) as exc:
+                log("Плашка не записана: {} — {}".format(entry["name"], exc))
+                failures.append({"entry": entry, "error": str(exc)})
+                continue
             render = enqueue_plaque_render(entry["name"], entry["position"], result)
             results.append({"entry": entry, "result": result, "render": render})
         clear_plaque_session(state, chat_id)
         created_count = sum(1 for item in results if item["result"]["action"] == "created")
         updated_count = sum(1 for item in results if item["result"]["action"] == "updated")
         public_lines = [
-            "Плашки отправлены в таблицу.",
-            "Добавлено: {}. Обновлено: {}.".format(created_count, updated_count),
+            "Плашки отправлены в таблицу." if results else "Ни одна плашка не записана.",
+            "Добавлено: {}. Обновлено: {}. Ошибок: {}.".format(created_count, updated_count, len(failures)),
             "",
         ]
         for index, item in enumerate(results, start=1):
@@ -3171,9 +3198,11 @@ def confirm_plaque(args, state, chat_id):
             entry = item["entry"]
             render_text = " " + plaque_render_message(item.get("render", {}))
             public_lines.append("{}. {}: {} — {}.{}".format(index, action_text.capitalize(), entry["name"], entry["position"], render_text))
+        for item in failures:
+            public_lines.append("Не записана: {} — {}. Причина: {}".format(item["entry"]["name"], item["entry"]["position"], item["error"]))
         admin_lines = [
             "Пакетная отправка плашек",
-            "Итог: добавлено {}, обновлено {}.".format(created_count, updated_count),
+            "Итог: добавлено {}, обновлено {}, ошибок {}.".format(created_count, updated_count, len(failures)),
             "",
         ]
         for index, item in enumerate(results, start=1):
@@ -3191,6 +3220,8 @@ def confirm_plaque(args, state, chat_id):
                     result["url"],
                 )
             )
+        for item in failures:
+            admin_lines.append("ОШИБКА: {} — {}\n{}".format(item["entry"]["name"], item["entry"]["position"], item["error"]))
         send_plain_chat_message(args, chat_id, "TS26: готово", "\n".join(public_lines), reply_markup=plaque_reply_keyboard())
         for admin_id in admin_chat_ids():
             try:
@@ -3714,15 +3745,38 @@ def main(argv=None):
     configure_bot_commands(args)
     if args.startup_message:
         send_startup_message(args, sheets, state=state)
-    if poll_admin_updates(args, sheets, state):
-        save_state(state_path, state)
+    def guarded(label, action):
+        """Run one loop step; log and continue instead of killing the monitor.
+
+        Everything below runs forever under launchd/Docker. A single bad sheet, an
+        expired Google token or a malformed Telegram update previously terminated the
+        whole process, which stopped notifications until someone noticed.
+        """
+        try:
+            return action()
+        except (MonitorError, ConfigError) as exc:
+            log("Шаг '{}' не выполнен: {}".format(label, exc))
+        except Exception as exc:  # noqa: BLE001 - keep the monitor alive
+            log("Непредвиденная ошибка в шаге '{}': {!r}".format(label, exc))
+        return False
+
+    def run_step(label, action):
+        if guarded(label, action):
+            guarded("save_state", lambda: save_state(state_path, state))
+
+    run_step("poll_admin_updates", lambda: poll_admin_updates(args, sheets, state))
+    consecutive_failures = 0
     while True:
-        if flush_content_plan_digest(args, sheets, state):
-            save_state(state_path, state)
-        if maybe_hourly_ae_ready_sync(args, sheets, state):
-            save_state(state_path, state)
-        if check_all(sheets, state, args):
-            save_state(state_path, state)
+        try:
+            run_step("flush_content_plan_digest", lambda: flush_content_plan_digest(args, sheets, state))
+            run_step("maybe_hourly_ae_ready_sync", lambda: maybe_hourly_ae_ready_sync(args, sheets, state))
+            run_step("check_all", lambda: check_all(sheets, state, args))
+            consecutive_failures = 0
+        except Exception as exc:  # noqa: BLE001 - last-resort guard
+            consecutive_failures += 1
+            backoff = min(300, 5 * (2 ** min(consecutive_failures, 6)))
+            log("Цикл проверки упал ({} подряд): {!r}. Пауза {} сек.".format(consecutive_failures, exc, backoff))
+            time.sleep(backoff)
         if args.once:
             break
         next_check_at = time.monotonic() + args.interval
@@ -3733,12 +3787,9 @@ def main(argv=None):
             remaining = next_check_at - time.monotonic()
             if remaining <= 0:
                 break
-            if flush_content_plan_digest(args, sheets, state):
-                save_state(state_path, state)
-            if maybe_hourly_ae_ready_sync(args, sheets, state):
-                save_state(state_path, state)
-            if poll_admin_updates(args, sheets, state):
-                save_state(state_path, state)
+            run_step("flush_content_plan_digest", lambda: flush_content_plan_digest(args, sheets, state))
+            run_step("maybe_hourly_ae_ready_sync", lambda: maybe_hourly_ae_ready_sync(args, sheets, state))
+            run_step("poll_admin_updates", lambda: poll_admin_updates(args, sheets, state))
             time.sleep(min(5, remaining))
 
 
