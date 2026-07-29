@@ -352,8 +352,20 @@ def load_state(path):
 def save_state(path, state):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(state, handle, ensure_ascii=False, indent=2, sort_keys=True)
+    # State holds chat ids, speaker names and cached sheet contents: keep it 0600
+    # and write atomically so a crash mid-write cannot truncate it.
+    descriptor = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            os.unlink(str(tmp_path))
+        except OSError:
+            pass
+        raise
     os.replace(str(tmp_path), str(path))
 
 
@@ -2276,6 +2288,10 @@ def parse_plaque_batch(value):
         if len(lines) > 1:
             raise ConfigError("Для пакетного добавления в каждой строке нужен формат «Фамилия Имя_Должность».")
         return []
+    # Check the limit before validating, so an oversized paste fails fast with the
+    # size message instead of a confusing per-line complaint.
+    if len(lines) > 50:
+        raise ConfigError("За один раз можно отправить до 50 плашек, а пришло {}.".format(len(lines)))
     entries = []
     for index, line in enumerate(lines, start=1):
         name_part, position_part = line.split("_", 1)
