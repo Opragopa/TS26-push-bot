@@ -81,6 +81,13 @@ CONTENT_PLAN_TIME_ZONE = load_time_zone(CONTENT_PLAN_TIME_ZONE_NAME, 1)
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
+YANDEX_DISK_RESOURCES_URL = "https://cloud-api.yandex.net/v1/disk/resources"
+YANDEX_DISK_OUTPUT_ROOT = os.environ.get(
+    "YANDEX_DISK_OUTPUT_ROOT",
+    "disk:/Заставки ТС 2026/Трансляция/Динамика/04_ПЛАШКИ/Запись",
+).strip()
+YANDEX_DISK_PLATES_ENABLED = env_bool("YANDEX_DISK_PLATES_ENABLED", True)
+PENDING_PLATE_LINKS_STATE_KEY = "_pending_plate_links"
 TELEGRAM_QUOTE_START = "::quote"
 TELEGRAM_QUOTE_END = "::endquote"
 TELEGRAM_PARSE_MODE = "HTML"
@@ -727,6 +734,166 @@ def try_send_telegram(args, title, message, subtitle="", url="", sheet=None, sta
         return False
 
 
+def yandex_disk_request(path, token, method="GET", params=None, timeout=10):
+    query = urllib.parse.urlencode(params or {})
+    url = "{}{}{}".format(YANDEX_DISK_RESOURCES_URL, path, "?{}".format(query) if query else "")
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": "OAuth {}".format(token), "User-Agent": USER_AGENT},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise MonitorError("Яндекс.Диск HTTP {}: {}".format(exc.code, body[:300]))
+    except urllib.error.URLError as exc:
+        raise MonitorError("Яндекс.Диск недоступен: {}".format(exc.reason))
+    try:
+        payload = json.loads(raw) if raw else {}
+    except ValueError:
+        raise MonitorError("Яндекс.Диск вернул не JSON: {}".format(raw[:300]))
+    if isinstance(payload, dict) and payload.get("error"):
+        raise MonitorError("Яндекс.Диск: {}".format(payload.get("description") or payload.get("error")))
+    return payload
+
+
+def yandex_plate_name_key(value):
+    text = normalize_space(value).casefold()
+    text = re.sub(r"\.(mov|mp4)$", "", text)
+    return re.sub(r"[^0-9a-zа-яё]+", "", text)
+
+
+def yandex_plate_links(names, timeout=10):
+    """Find and publish today's rendered plate files by speaker name."""
+    token = os.environ.get("YANDEX_DISK_TOKEN", "").strip()
+    if not YANDEX_DISK_PLATES_ENABLED or not token or not YANDEX_DISK_OUTPUT_ROOT:
+        return {}, []
+    wanted = {yandex_plate_name_key(name): normalize_space(name) for name in names if normalize_space(name)}
+    if not wanted:
+        return {}, []
+    try:
+        payload = yandex_disk_request(
+            "/",
+            token,
+            params={"path": YANDEX_DISK_OUTPUT_ROOT, "limit": 1000, "offset": 0},
+            timeout=timeout,
+        )
+        items = ((payload.get("_embedded") or {}).get("items") or [])
+        links = {}
+        for item in items:
+            if item.get("type") != "file":
+                continue
+            name = str(item.get("name") or "")
+            key = yandex_plate_name_key(name)
+            matched_key = next(
+                (wanted_key for wanted_key in wanted if key == wanted_key or key.endswith(wanted_key) or wanted_key.endswith(key)),
+                None,
+            )
+            if not matched_key:
+                continue
+            public_url = str(item.get("public_url") or "").strip()
+            path = str(item.get("path") or "").strip()
+            if not public_url and path:
+                try:
+                    yandex_disk_request("/publish", token, method="PUT", params={"path": path}, timeout=timeout)
+                    public_url = str(
+                        yandex_disk_request("/", token, params={"path": path}, timeout=timeout).get("public_url") or ""
+                    ).strip()
+                except MonitorError:
+                    continue
+            if public_url:
+                links[wanted[matched_key]] = public_url
+        return links, []
+    except MonitorError as exc:
+        return {}, [str(exc)]
+
+
+def current_day_marker(moment=None):
+    moment = moment or moscow_now()
+    return {moment.strftime("%d.%m"), "{}.{}".format(moment.day, moment.month)}
+
+
+def current_day_change_details(sheet_label, previous, current, moment=None):
+    """Return today's changed grid cells and speaker names for plate links."""
+    previous_rows = previous.get("cells") or []
+    current_rows = current.get("cells") or []
+    if not previous_rows or not current_rows:
+        return [], []
+    marker = current_day_marker(moment)
+    header_index = detect_header_row(current_rows)
+    headers = headers_for(current_rows, header_index)
+    key_col = detect_key_column(headers)
+    pairs = [(row_index, row_index) for row_index in range(max(len(previous_rows), len(current_rows)))]
+    messages = []
+    names = []
+    for old_index, new_index in pairs:
+        day_name = day_context(current_rows, new_index) or day_context(previous_rows, old_index)
+        if not any(item in day_name for item in marker):
+            continue
+        row_name = row_identity(current_rows, headers, new_index, key_col)
+        for col_index, header in enumerate(headers):
+            old_value = cell(previous_rows, old_index, col_index)
+            new_value = cell(current_rows, new_index, col_index)
+            if old_value == new_value:
+                continue
+            messages.append(describe_grid_change(sheet_label, day_name, row_name, header, old_value, new_value))
+            for candidate in (old_value, new_value):
+                if candidate and candidate != "пусто" and len(candidate.split()) in (2, 3) and len(candidate) <= 100:
+                    names.append(candidate)
+    unique_names = []
+    seen = set()
+    for name in names:
+        key = normalize_person_key(name)
+        if key not in seen:
+            seen.add(key)
+            unique_names.append(name)
+    return messages, unique_names
+
+
+def notify_current_day_plate_changes(args, sheet, previous, current, state):
+    messages, names = current_day_change_details(sheet["label"], previous, current)
+    if not messages:
+        return False
+    links, link_errors = yandex_plate_links(names, timeout=args.timeout)
+    lines = ["Изменились плашки сегодняшнего дня.", ""] + messages
+    if links:
+        lines.extend(["", "Готовые плашки на Яндекс.Диске:"])
+        lines.extend(["{}: {}".format(name, links[name]) for name in links])
+    missing = [name for name in names if name not in links]
+    if missing:
+        lines.extend(["", "Еще не готовы: {}.".format(", ".join(missing))])
+    if link_errors:
+        lines.append("Ссылки Яндекс.Диска временно недоступны.")
+        log("Не удалось получить ссылки готовых плашек: {}".format("; ".join(link_errors)))
+    pending = state.setdefault(PENDING_PLATE_LINKS_STATE_KEY, {})
+    pending["date"] = moscow_now().strftime("%d.%m")
+    pending["names"] = missing
+    notify(args, "TS26: плашки на сегодня", "\n".join(lines), subtitle=sheet["label"], sheet=sheet, state=state)
+    return True
+
+
+def maybe_send_pending_plate_links(args, sheet, state):
+    pending = state.get(PENDING_PLATE_LINKS_STATE_KEY) or {}
+    names = [normalize_space(item) for item in pending.get("names") or [] if normalize_space(item)]
+    if not names or pending.get("date") != moscow_now().strftime("%d.%m"):
+        if names and pending.get("date") != moscow_now().strftime("%d.%m"):
+            state.pop(PENDING_PLATE_LINKS_STATE_KEY, None)
+        return False
+    links, errors = yandex_plate_links(names, timeout=args.timeout)
+    if errors or not links:
+        return False
+    remaining = [name for name in names if name not in links]
+    pending["names"] = remaining
+    lines = ["Готовые плашки на Яндекс.Диске:"]
+    lines.extend(["{}: {}".format(name, links[name]) for name in links])
+    notify(args, "TS26: плашки готовы", "\n".join(lines), subtitle=sheet["label"], sheet=sheet, state=state)
+    if not remaining:
+        state.pop(PENDING_PLATE_LINKS_STATE_KEY, None)
+    return True
+
+
 def content_plan_digest_state(state):
     digest = state.setdefault(CONTENT_PLAN_DIGEST_STATE_KEY, {})
     if not isinstance(digest, dict):
@@ -828,8 +995,23 @@ def groq_chat_completion_text(payload, timeout):
         raise MonitorError("Groq ошибка: {}".format(detail))
     choices = parsed.get("choices") or []
     if choices:
-        message = choices[0].get("message") or {}
+        choice = choices[0] or {}
+        message = choice.get("message") or {}
         text = extract_chat_message_text(message.get("content"))
+        if not text:
+            text = extract_chat_message_text(choice.get("text"))
+        if not text:
+            # DeepSeek may put a JSON answer in an alternate field on an occasional empty-content response.
+            for key in ("output_text", "answer"):
+                text = extract_chat_message_text(message.get(key))
+                if text:
+                    break
+        if not text and provider_name.casefold() == "deepseek":
+            reasoning = extract_chat_message_text(message.get("reasoning_content"))
+            if reasoning:
+                candidate = extract_json_object_text(reasoning)
+                if candidate.lstrip().startswith("{"):
+                    text = candidate
         if text:
             return text
     raise MonitorError("Groq не вернул текст сводки.")
@@ -1019,6 +1201,9 @@ def ae_correction_instructions():
         "Если описание сводится к повтору темы, верни пустую строку. "
         "Если в raw_text есть маркер 'главная встреча дня', описание должно быть 'Главная встреча дня'. "
         "Нумерацию вида '1)'/'2)' не включай ни в тему, ни в должности, ни в имена. "
+        "В русском ФИО из двух слов первое слово всегда сохраняй как фамилию, второе как имя. "
+        "Не удаляй незнакомую фамилию с окончанием -ич/-евич/-ович: такое слово может быть фамилией, например 'Кастюкевич Игорь'. "
+        "Отчество учитывай только как третье слово после уже распознанных фамилии и имени. Никогда не возвращай вместо полного ФИО только имя. "
         "Если передан position_reference, это согласованный справочник: при точном совпадении верни должность ровно из справочника, без перефразирования. "
         "Если сомневаешься, оставь поле пустым и добавь предупреждение. "
         "Схема: {\"topic\":\"\",\"description\":\"\",\"format\":\"\",\"people\":[{\"name\":\"\",\"role\":\"\",\"position\":\"\"}],\"warnings\":[],\"confidence\":0.0}. "
@@ -1042,6 +1227,7 @@ def ae_correction_payload(context):
 def ae_correction_provider_request(provider, context, timeout):
     provider = normalize_space(provider).casefold()
     prompt = json.dumps(ae_correction_payload(context), ensure_ascii=False)
+    max_tokens = max(400, env_int("AI_CORRECTION_MAX_OUTPUT_TOKENS", 800))
     attempts = [
         {
             "messages": [
@@ -1049,7 +1235,7 @@ def ae_correction_provider_request(provider, context, timeout):
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.1,
-            "max_tokens": 1400,
+            "max_tokens": max_tokens,
         },
         {
             "messages": [
@@ -1058,7 +1244,7 @@ def ae_correction_provider_request(provider, context, timeout):
                 {"role": "assistant", "content": "{"},
             ],
             "temperature": 0,
-            "max_tokens": 1400,
+            "max_tokens": max_tokens,
         },
     ]
     last_error = None
@@ -1072,6 +1258,7 @@ def ae_correction_provider_request(provider, context, timeout):
                 "max_tokens": attempt["max_tokens"],
                 "response_format": {"type": "json_object"},
             }
+            payload["thinking"] = {"type": "disabled"}
             text = chat_completion_text("DeepSeek", DEEPSEEK_CHAT_COMPLETIONS_URL, os.environ.get("DEEPSEEK_API_KEY", "").strip(), payload, timeout)
         elif provider == "groq":
             model = os.environ.get("GROQ_CORRECTION_MODEL", os.environ.get("GROQ_SUMMARY_MODEL", "llama-3.3-70b-versatile")).strip() or "llama-3.3-70b-versatile"
@@ -1111,6 +1298,7 @@ def build_ae_llm_corrector(args):
     if not enabled or not (has_primary or has_fallback):
         return None
     usage = {"count": 0}
+    blocked_providers = set()
 
     def correct(context):
         if usage["count"] >= max_calls:
@@ -1121,11 +1309,15 @@ def build_ae_llm_corrector(args):
             providers.append(fallback)
         last_error = None
         for item in providers:
+            if item in blocked_providers:
+                continue
             try:
                 return ae_correction_provider_request(item, context, args.timeout)
             except (MonitorError, ConfigError) as exc:
                 last_error = exc
                 log("AE LLM-коррекция через {} не получена: {}".format(item, exc))
+                if " HTTP 429:" in str(exc) or "rate_limit_exceeded" in str(exc):
+                    blocked_providers.add(item)
         return {"warnings": ["LLM-коррекция недоступна: {}".format(last_error)], "confidence": 0}
 
     return correct
@@ -2455,7 +2647,11 @@ def session_shift_by_day():
     config_path = Path(os.environ.get("AE_RENDER_CONFIG", Path(__file__).resolve().parent / "ae_render_config.json")).expanduser()
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        return config.get("templates", {}).get("session_topic", {}).get("shift_by_day", {})
+        shifts = config.get("templates", {}).get("session_topic", {}).get("shift_by_day", {})
+        active = str(config.get("active_shift") or os.environ.get("AE_ACTIVE_SHIFT", "")).strip()
+        if active:
+            return {str(day): active for day in shifts if str(day).strip()}
+        return shifts
     except (OSError, ValueError) as exc:
         log("Не удалось прочитать карту смен для рендера тем: {}".format(exc))
         return {}
@@ -2469,6 +2665,9 @@ def session_day_number(value):
 def enqueue_session_topic_renders(records):
     if not AE_RENDER_ENABLED:
         return 0
+    session_topics_enabled = os.environ.get("AE_RENDER_SESSION_TOPICS_ENABLED", "false").strip().lower()
+    if session_topics_enabled not in {"1", "true", "yes", "y", "on"}:
+        return 0
     shifts = session_shift_by_day()
     queued = 0
     for session in records.get("legacy_sessions") or []:
@@ -2476,7 +2675,7 @@ def enqueue_session_topic_renders(records):
         shift = str(shifts.get(day, "")).strip()
         topic = str(session.get("ТЕМА", "")).strip()
         description = str(session.get("ОПИСАНИЕ", "")).strip()
-        if not day or not shift or not topic or not description:
+        if not day or not shift or not topic:
             continue
         source_key = "session:{}:{}:{}:{}".format(day, shift, session.get("ПЛОЩАДКА", ""), session.get("ИСХОДНАЯ_ЯЧЕЙКА", ""))
         try:
@@ -2531,11 +2730,36 @@ def sync_ae_ready_badges_to_motion_sheet(records):
         else:
             result["skipped"] += 1
 
+    try:
+        worksheet = get_plaque_worksheet()
+        sheet_values = run_google_action(
+            "Не удалось прочитать строки листа для плашек", worksheet.get_all_values
+        )
+    except (MonitorError, ConfigError) as exc:
+        result["errors"].append(str(exc))
+        log("AE-ready плашки не перенесены в МОУШЕН: {}".format(exc))
+        return result
+
     for badge in selected.values():
         try:
             name = validate_person_name(badge.get("ФИО спикера", ""))
             position = validate_position(badge.get("Должность", ""))
-            write_result = write_plaque_to_sheet(name, position, note_text=AE_READY_PLAQUE_NOTE_TEXT)
+            write_result = write_plaque_to_sheet(
+                name,
+                position,
+                note_text=AE_READY_PLAQUE_NOTE_TEXT,
+                worksheet=worksheet,
+                values=sheet_values,
+                verify=False,
+            )
+            while len(sheet_values) < write_result["row"]:
+                sheet_values.append([])
+            row = sheet_values[write_result["row"] - 1]
+            while len(row) < max(PLAQUE_NAME_COL, PLAQUE_POSITION_COL, PLAQUE_NOTE_COL):
+                row.append("")
+            row[PLAQUE_NAME_COL - 1] = name
+            row[PLAQUE_POSITION_COL - 1] = position
+            row[PLAQUE_NOTE_COL - 1] = AE_READY_PLAQUE_NOTE_TEXT
         except (MonitorError, ConfigError, ValueError) as exc:
             message = "{}: {}".format(badge.get("ФИО спикера") or "без имени", exc)
             result["errors"].append(message)
@@ -2595,6 +2819,7 @@ def run_ae_ready_sync(args, state, force=False, rebuild=False):
     return {
         "changed": True,
         "spreadsheet_id": spreadsheet_id,
+        "queued_session_topics": queued_session_topics,
         "message": "AE-ready обновлена: сессий {}, людей {}, плашек {}, визиток {}, warnings {}, в МОУШЕН {}, тем поставлено в рендер {}.".format(
             data["sessions"],
             data["unique_people"],
@@ -2702,9 +2927,11 @@ def column_letter(index):
     return letters
 
 
-def write_plaque_to_sheet(name, position, note_text=PLAQUE_NOTE_TEXT):
-    worksheet = get_plaque_worksheet()
-    values = run_google_action("Не удалось прочитать строки листа для плашек", worksheet.get_all_values)
+def write_plaque_to_sheet(name, position, note_text=PLAQUE_NOTE_TEXT, worksheet=None, values=None, verify=True):
+    worksheet = worksheet or get_plaque_worksheet()
+    values = values if values is not None else run_google_action(
+        "Не удалось прочитать строки листа для плашек", worksheet.get_all_values
+    )
     row_index, action = find_plaque_row(values, name)
     updates = [
         {"range": "{}{}".format(column_letter(PLAQUE_NAME_COL), row_index), "values": [[name]]},
@@ -2720,7 +2947,11 @@ def write_plaque_to_sheet(name, position, note_text=PLAQUE_NOTE_TEXT):
         name,
     ))
     run_google_action("Не удалось записать плашку в Google Sheets", lambda: worksheet.batch_update(updates, value_input_option="USER_ENTERED"))
-    verified = verify_plaque_row(worksheet, row_index, name, position, note_text=note_text)
+    verified = (
+        verify_plaque_row(worksheet, row_index, name, position, note_text=note_text)
+        if verify
+        else {"name": name, "position": position, "note": note_text}
+    )
     return {
         "row": row_index,
         "action": action,
@@ -2767,6 +2998,16 @@ def enqueue_plaque_render(name, position, result):
                     "renderer_busy": bool(data.get("renderer_busy")),
                 }
             return {"status": "error", "error": data.get("error", "trigger rejected")}
+        except urllib.error.HTTPError as exc:
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+                data = json.loads(body)
+                error = data.get("error") or body
+                log("AE render trigger отклонил плашку: HTTP {}: {}".format(exc.code, error))
+                return {"status": "error", "error": error, "code": data.get("code", "")}
+            except (OSError, ValueError):
+                log("Не удалось вызвать AE render trigger: HTTP {}".format(exc.code))
+                return {"status": "error", "error": "HTTP {}".format(exc.code)}
         except Exception as exc:
             log("Не удалось вызвать AE render trigger: {}".format(exc))
             return {"status": "error", "error": str(exc)}
@@ -2846,6 +3087,8 @@ def plaque_render_message(render):
         return "Рендер уже был в очереди и скоро начнется."
     if status == "disabled":
         return "Автоматический рендер отключен."
+    if render.get("code") == "wrong_project" or "Откройте в After Effects проект" in str(render.get("error") or ""):
+        return "Рендер не поставлен. Переключитесь в After Effects на проект для плашек и повторите действие."
     return "Плашка сохранена, но рендер не поставлен в очередь."
 
 
@@ -3283,6 +3526,8 @@ def check_sheet(sheet, state, args):
         "checked_at": now_text(),
         "error": "",
     })
+    if normalize_header(label) == normalize_header("План записи"):
+        maybe_send_pending_plate_links(args, sheet, state)
 
     old_hash = previous.get("hash")
     if old_hash and old_hash != current["hash"]:
@@ -3293,6 +3538,8 @@ def check_sheet(sheet, state, args):
             queue_size = queue_content_plan_change(state, message, captured_at=current["checked_at"])
             log("Изменение Контент-плана добавлено в почасовую очередь: событий {}.".format(queue_size))
         else:
+            if normalize_header(label) == normalize_header("План записи"):
+                notify_current_day_plate_changes(args, sheet, previous, current, state)
             notify(args, "TS26: обновилась таблица", message, subtitle=label, url=sheet["url"], sheet=sheet, state=state)
     elif not old_hash:
         log("Первый снимок: {} (строк: {}, {} байт)".format(label, current["rows"], current["bytes"]))

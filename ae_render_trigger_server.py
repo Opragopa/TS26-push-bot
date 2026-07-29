@@ -68,6 +68,9 @@ def drain_queue(config, retry_interval):
 
 
 def trigger_worker(config, retry_interval):
+    run_inline = str(os.environ.get("AE_RENDER_TRIGGER_DRAIN_QUEUE", "false")).strip().lower()
+    if run_inline not in {"1", "true", "yes", "y", "on"}:
+        return
     thread = threading.Thread(target=drain_queue, args=(config, retry_interval), daemon=True)
     thread.start()
 
@@ -135,6 +138,10 @@ class TriggerHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0") or 0)
             payload = json.loads(self.rfile.read(length).decode("utf-8") if length else "{}")
+            project_error = ae_render_worker.expected_project_error(self.server.config)
+            if project_error:
+                self.send_json(409, {"ok": False, "error": project_error, "code": "wrong_project"})
+                return
             job, created = enqueue_payload(self.server.config, payload)
             status = queue_status(self.server.config, job.get("id"))
             trigger_worker(self.server.config, self.server.retry_interval)

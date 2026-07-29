@@ -11,6 +11,7 @@ DATA_DIR="$HOME/Documents/tg_sheet_monitor"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$PLIST_DIR/com.tg-pushes-ts26.ae-render-worker.plist"
 PYTHON_BIN="$(command -v python3)"
+POLL_INTERVAL="${AE_RENDER_WORKER_INTERVAL:-60}"
 
 mkdir -p "$DATA_DIR" "$PLIST_DIR"
 
@@ -39,6 +40,8 @@ cat > "$PLIST_PATH" <<PLIST
     <string>$PYTHON_BIN</string>
     <string>$SCRIPT_DIR/ae_render_worker.py</string>
     <string>--poll-sheets</string>
+    <string>--interval</string>
+    <string>$POLL_INTERVAL</string>
   </array>
   <key>WorkingDirectory</key>
   <string>$SCRIPT_DIR</string>

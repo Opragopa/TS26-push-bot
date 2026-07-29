@@ -45,7 +45,7 @@
             fail("В After Effects открыт другой проект.");
         }
         if (app.project.renderQueue.rendering === true) fail("After Effects уже рендерит; Render Queue не трогаю.");
-        if (app.project.renderQueue.numItems < 1) fail("Render Queue пуст.");
+        if (app.project.renderQueue.numItems < 1) fail("Render Queue пуста после подготовки композиции.");
 
         var comp = app.project.renderQueue.item(1).comp;
         while (app.project.renderQueue.numItems > 0) app.project.renderQueue.item(1).remove();

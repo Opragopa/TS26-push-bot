@@ -4,6 +4,7 @@
   "afterfx_bundle_id": "com.adobe.AfterEffects.application",
   "afterfx_launch_method": "osascript_doscript",
   "reuse_open_project": true,
+  "require_open_project": true,
   "aerender_bin": "/Applications/Adobe After Effects 2026/aerender",
   "aerender_working_dir": "/Applications/Adobe After Effects 2026",
   "google_oauth_user_file": "/Users/opragopa/Documents/tg-pushes-TS26/google_oauth_user.json",
@@ -59,7 +60,9 @@
   "plaque_note_col": 5,
   "plaque_ae_id_col": 0,
   "plaque_note_text": "<-- добавлено через ТГ бота",
-  "ae_ready_spreadsheet_id": "",
+  "ae_ready_spreadsheet_id": "https://docs.google.com/spreadsheets/d/1--wpJs_8wKO9s_afrcAtoUQG8kvk-vhFgA0KjbmXcTU/edit",
+  "session_topics_auto_render": false,
+  "active_shift": "ПРАВДА",
   "ae_ready_state_path": "data/sheet_state.json",
   "ae_ready_sessions_worksheet": "content_plan_sessions",
   "shift_by_day": {

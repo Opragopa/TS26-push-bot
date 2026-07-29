@@ -28,6 +28,37 @@ class RenderWorkerPayloadTests(unittest.TestCase):
             self.assertEqual([claimed["id"]], [job["id"] for job in recovered])
             self.assertEqual("queued", ae_render_queue.load_queue_unlocked(queue_path)["jobs"][0]["status"])
 
+    def test_error_job_is_not_duplicated_by_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            queue_path = Path(temp_dir) / "queue.json"
+            created, was_created = ae_render_queue.enqueue(queue_path, "plaque", {"name": "Иванов Иван"}, source_key="plaque:1")
+            self.assertTrue(was_created)
+            ae_render_queue.update_job(queue_path, created["id"], status="error", error="AE failed")
+
+            existing, was_created = ae_render_queue.enqueue(queue_path, "plaque", {"name": "Иванов Иван"}, source_key="plaque:1")
+
+            self.assertFalse(was_created)
+            self.assertEqual(created["id"], existing["id"])
+            self.assertEqual(1, len(ae_render_queue.load_queue_unlocked(queue_path)["jobs"]))
+
+    def test_error_job_can_be_requeued_when_caller_excludes_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            queue_path = Path(temp_dir) / "queue.json"
+            created, _ = ae_render_queue.enqueue(queue_path, "plaque", {"name": "Иванов Иван"}, source_key="plaque:1")
+            ae_render_queue.update_job(queue_path, created["id"], status="error", error="AE failed")
+
+            new_job, was_created = ae_render_queue.enqueue(
+                queue_path,
+                "plaque",
+                {"name": "Иванов Иван"},
+                source_key="plaque:1",
+                dedupe_statuses={"queued", "preparing", "rendering", "done"},
+            )
+
+            self.assertTrue(was_created)
+            self.assertNotEqual(created["id"], new_job["id"])
+            self.assertEqual(2, len(ae_render_queue.load_queue_unlocked(queue_path)["jobs"]))
+
     def setUp(self):
         self.config = {
             "project_path": "/tmp/source.aep",
@@ -124,6 +155,38 @@ class RenderWorkerPayloadTests(unittest.TestCase):
             self.assertTrue(tsv_path.exists())
             self.assertIn("Большая тема", tsv_path.read_text(encoding="utf-8"))
 
+    def test_stale_session_job_from_other_shift_is_not_rendered(self):
+        job = {"kind": "session_topic", "payload": {"shift": "РОДИНА"}}
+        self.assertFalse(ae_render_worker.job_matches_active_shift({"session_topics_auto_render": False}, job))
+        self.assertFalse(ae_render_worker.job_matches_active_shift({"active_shift": "ПРАВДА"}, job))
+        self.assertTrue(ae_render_worker.job_matches_active_shift({"active_shift": "ПРАВДА"}, {"kind": "plaque", "payload": {}}))
+
+    def test_project_paths_match_normalized_paths(self):
+        self.assertTrue(ae_render_worker.project_paths_match("/tmp/project.aep", "/tmp/./project.aep"))
+        self.assertFalse(ae_render_worker.project_paths_match("/tmp/project.aep", "/tmp/other.aep"))
+
+    def test_session_topic_payload_allows_empty_description(self):
+        job = {
+            "kind": "session_topic",
+            "payload": {
+                "day": "1",
+                "shift": "ПРАВДА",
+                "topic": "Тема без описания",
+                "description": "",
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = ae_render_worker.build_prepare_payload(
+                self.config,
+                job,
+                Path(temp_dir) / "staged.mov",
+                Path(temp_dir) / "render.aep",
+            )
+
+            tsv_text = Path(payload["session_topic_tsv_path"]).read_text(encoding="utf-8")
+            self.assertIn("Тема без описания", tsv_text)
+            self.assertTrue(tsv_text.endswith("\n"))
+
     def test_open_queue_fallback_script_is_available(self):
         self.assertTrue(ae_render_worker.OPEN_QUEUE_RENDER_SCRIPT.exists())
         script = ae_render_worker.OPEN_QUEUE_RENDER_SCRIPT.read_text(encoding="utf-8")
@@ -161,6 +224,32 @@ class RenderWorkerPayloadTests(unittest.TestCase):
         open_queue_script = ae_render_worker.OPEN_QUEUE_RENDER_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("renderQueue.rendering === true", prepare_script)
         self.assertIn("renderQueue.rendering === true", open_queue_script)
+
+    def test_open_project_mode_does_not_create_temporary_project(self):
+        job = {"kind": "plaque", "payload": {"name": "Иванов Иван", "position": "Тест"}}
+        payload = ae_render_worker.build_prepare_payload(
+            self.config, job, Path("/tmp/staged.mov"), Path("/tmp/render.aep")
+        )
+        self.assertTrue(payload["require_open_project"])
+        self.assertEqual("", payload["temporary_project_path"])
+        script = ae_render_worker.PREPARE_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("Откройте проект", script)
+        self.assertNotIn("app.project.save", script)
+
+    def test_cleanup_job_dir_removes_only_job_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            job_dir = root / "job-1"
+            job_dir.mkdir()
+            (job_dir / "render.aep").write_text("temporary", encoding="utf-8")
+            shared = root / "_busy_check"
+            shared.mkdir()
+            ae_render_worker.cleanup_job_dir(
+                {"temp_project_dir": str(root)},
+                {"id": "job-1"},
+            )
+            self.assertFalse(job_dir.exists())
+            self.assertTrue(shared.exists())
 
 
 class RenderRegistryTests(unittest.TestCase):

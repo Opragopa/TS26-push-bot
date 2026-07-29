@@ -85,14 +85,18 @@ def locked_queue(queue_path):
     return queue_path, lock_stream
 
 
-def enqueue(queue_path, kind, payload, source_key=""):
+def enqueue(queue_path, kind, payload, source_key="", dedupe_statuses=None):
     queue_path, lock_stream = locked_queue(queue_path)
     try:
         data = load_queue_unlocked(queue_path)
         source_key = str(source_key or "").strip()
+        if dedupe_statuses is None:
+            dedupe_statuses = {"queued", "preparing", "rendering", "done", "error"}
+        else:
+            dedupe_statuses = set(dedupe_statuses)
         if source_key:
             for job in data["jobs"]:
-                if job.get("source_key") == source_key and job.get("status") in {"queued", "preparing", "rendering", "done"}:
+                if job.get("source_key") == source_key and job.get("status") in dedupe_statuses:
                     return job, False
         job = {
             "id": uuid.uuid4().hex,

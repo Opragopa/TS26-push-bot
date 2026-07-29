@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import os
 import sys
 import tempfile
@@ -267,6 +268,70 @@ class HourlyContentPlanTests(unittest.TestCase):
             monitor.check_sheet(recording_sheet, state, self.args)
         self.assertEqual(queued, [True])
         self.assertEqual(notified, [True])
+
+    def test_current_day_plate_changes_are_separated(self):
+        previous = {
+            "cells": [
+                ["ДЕНЬ 1 · 27.07", "", ""],
+                ["", "10:00", "Иванов Иван"],
+                ["ДЕНЬ 2 · 28.07", "", ""],
+                ["", "10:00", "Петров Петр"],
+            ]
+        }
+        current = {
+            "cells": [
+                ["ДЕНЬ 1 · 27.07", "", ""],
+                ["", "10:00", "Сидоров Сидор"],
+                ["ДЕНЬ 2 · 28.07", "", ""],
+                ["", "10:00", "Иванов Иван"],
+            ]
+        }
+        moment = dt.datetime(2026, 7, 27, 12, 0, tzinfo=monitor.CONTENT_PLAN_TIME_ZONE)
+        messages, names = monitor.current_day_change_details("План записи", previous, current, moment=moment)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Сидоров Сидор", messages[0])
+        self.assertEqual(names, ["Иванов Иван", "Сидоров Сидор"])
+
+    def test_yandex_plate_links_use_existing_public_urls(self):
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        with mock.patch.dict(os.environ, {"YANDEX_DISK_TOKEN": "token"}), mock.patch.object(
+            monitor.urllib.request,
+            "urlopen",
+            return_value=FakeResponse({"_embedded": {"items": [{"type": "file", "name": "17-30_Иванов Иван.mov", "public_url": "https://disk.yandex.ru/i/test"}]}}),
+        ):
+            links, errors = monitor.yandex_plate_links(["Иванов Иван"], timeout=5)
+        self.assertEqual(links, {"Иванов Иван": "https://disk.yandex.ru/i/test"})
+        self.assertEqual(errors, [])
+
+    def test_pending_plate_link_is_sent_after_render_appears(self):
+        state = {
+            monitor.PENDING_PLATE_LINKS_STATE_KEY: {
+                "date": "27.07",
+                "names": ["Иванов Иван"],
+            }
+        }
+        sent = []
+        sheet = {"label": "План записи", "url": "https://docs.google.com/test"}
+        with mock.patch.object(monitor, "yandex_plate_links", return_value=({"Иванов Иван": "https://disk.yandex.ru/i/test"}, [])), mock.patch.object(
+            monitor, "notify", side_effect=lambda *_args, **_kwargs: sent.append(True)
+        ):
+            with mock.patch.object(monitor, "moscow_now", return_value=dt.datetime(2026, 7, 27, tzinfo=monitor.CONTENT_PLAN_TIME_ZONE)):
+                changed = monitor.maybe_send_pending_plate_links(self.args, sheet, state)
+        self.assertTrue(changed)
+        self.assertEqual(sent, [True])
+        self.assertNotIn(monitor.PENDING_PLATE_LINKS_STATE_KEY, state)
 
     def test_parse_plaque_batch_accepts_multiple_rows(self):
         entries = monitor.parse_plaque_batch("Иванов Иван_Должность 1\nДмитриев Дмитрий _ Должность 2")

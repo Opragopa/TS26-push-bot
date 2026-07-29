@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Prepare a temporary AE project with JSX and render it through aerender."""
+"""Prepare the open AE project with JSX and render it through After Effects."""
 
 import argparse
 import json
@@ -60,10 +60,27 @@ def load_config(path):
             value = config_path.parent / value
         data[key] = str(value)
     data.setdefault("env_file", str(config_path.parent / ".env"))
+    data.setdefault("require_open_project", True)
     data.setdefault("respect_existing_render", True)
     data.setdefault("busy_check_timeout_seconds", 5)
     data.setdefault("job_lease_seconds", 4 * 60 * 60)
     return data
+
+
+def job_matches_active_shift(config, job):
+    """Prevent stale session jobs from another shift reaching After Effects."""
+    if job.get("kind") != "session_topic":
+        return True
+    auto_render = config.get("session_topics_auto_render")
+    if auto_render is None:
+        auto_render = os.environ.get("AE_RENDER_SESSION_TOPICS_ENABLED", "false")
+    if str(auto_render).strip().lower() not in {"1", "true", "yes", "y", "on"}:
+        return False
+    configured = str(config.get("active_shift") or os.environ.get("AE_ACTIVE_SHIFT", "")).strip()
+    if not configured:
+        return True
+    actual = str((job.get("payload") or {}).get("shift") or "").strip()
+    return actual == configured
 
 
 def safe_file_name(value):
@@ -77,6 +94,10 @@ def required_text(payload, name):
     if not value:
         raise RenderWorkerError("Для {} не заполнено поле '{}'".format(payload.get("kind", "задания"), name))
     return value
+
+
+def optional_text(payload, name):
+    return str(payload.get(name, "")).strip()
 
 
 def output_module_template(config, kind):
@@ -98,7 +119,7 @@ def write_session_topic_tsv(job, path):
     headers = ["ТЕМА", "ОПИСАНИЕ", "ИМЯ_КОМПОЗИЦИИ", "ДЕНЬ", "Смена"]
     values = [
         required_text(payload, "topic"),
-        required_text(payload, "description"),
+        optional_text(payload, "description"),
         safe_file_name(required_text(payload, "topic")),
         required_text(payload, "day"),
         required_text(payload, "shift"),
@@ -133,9 +154,10 @@ def build_prepare_payload(config, job, output_path, project_path):
     result = {
         "kind": kind,
         "source_project_path": config["project_path"],
-        "temporary_project_path": str(project_path),
+        "temporary_project_path": "",
         "output_path": str(output_path),
         "use_open_project": config.get("reuse_open_project", True) is True,
+        "require_open_project": config.get("require_open_project", True) is True,
         "prepared_marker_path": str(project_path.parent / "prepared.mode"),
         "prepared_comp_name_path": str(project_path.parent / "prepared_comp_name.txt"),
         "output_module_template": output_module_template(config, kind),
@@ -165,7 +187,7 @@ def build_prepare_payload(config, job, output_path, project_path):
             "topic_layer": session_template["topic_layer"],
             "description_layer": session_template["description_layer"],
             "topic": required_text(payload, "topic"),
-            "description": required_text(payload, "description"),
+            "description": optional_text(payload, "description"),
             "day": required_text(payload, "day"),
             "shift": required_text(payload, "shift"),
         })
@@ -266,6 +288,69 @@ def renderer_busy(config):
     return after_effects_render_queue_busy(config)
 
 
+def project_paths_match(expected, actual):
+    if not expected or not actual:
+        return False
+    return os.path.normcase(os.path.normpath(os.path.expanduser(str(expected)))) == os.path.normcase(
+        os.path.normpath(os.path.expanduser(str(actual)))
+    )
+
+
+def active_project_path(config):
+    """Read the currently open AE project without changing it."""
+    if not process_exists("After Effects"):
+        return ""
+    check_dir = Path(config["temp_project_dir"]).expanduser() / "_project_check"
+    check_dir.mkdir(parents=True, exist_ok=True)
+    script_path = check_dir / "active_project.jsx"
+    result_path = check_dir / "active_project.txt"
+    error_path = check_dir / "active_project.error"
+    for path in (result_path, error_path):
+        if path.exists():
+            path.unlink()
+    script_path.write_text(
+        """
+(function () {
+    var resultFile = new File(%s);
+    var errorFile = new File(%s);
+    function write(file, text) {
+        file.encoding = "UTF-8";
+        if (file.open("w")) { file.write(String(text)); file.close(); }
+    }
+    try {
+        var path = app.project && app.project.file ? app.project.file.fsName : "";
+        write(resultFile, path);
+    } catch (error) {
+        write(errorFile, error && error.toString ? error.toString() : error);
+    }
+}());
+""".strip() % (json.dumps(str(result_path)), json.dumps(str(error_path))),
+        encoding="utf-8",
+    )
+    try:
+        subprocess.run(
+            ["osascript", str(APPLE_SCRIPT), str(script_path)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=int(config.get("busy_check_timeout_seconds", 5)),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result_path.read_text(encoding="utf-8").strip() if result_path.exists() else ""
+
+
+def expected_project_error(config):
+    expected = str(config.get("project_path") or "").strip()
+    actual = active_project_path(config)
+    if project_paths_match(expected, actual):
+        return ""
+    if actual:
+        return "Откройте в After Effects проект '{}'. Сейчас открыт другой проект: '{}'.".format(expected, actual)
+    return "Откройте в After Effects проект '{}' перед запуском рендера плашки.".format(expected)
+
+
 def ensure_renderer_available(config):
     if renderer_busy(config):
         raise RenderWorkerBusy("After Effects сейчас рендерит другое задание; воркер подождет.")
@@ -307,6 +392,13 @@ def render_open_queue(params_path, project_dir):
         raise RenderWorkerError("After Effects не подтвердил завершение резервного рендера.")
 
 
+def cleanup_job_dir(config, job):
+    """Remove per-job scripts and staged media, leaving only the shared busy check."""
+    job_dir = Path(config["temp_project_dir"]).expanduser() / str(job["id"])
+    if job_dir.exists():
+        shutil.rmtree(str(job_dir))
+
+
 def process_job(config, job):
     ensure_renderer_available(config)
     project_dir = Path(config["temp_project_dir"]).expanduser() / job["id"]
@@ -330,15 +422,9 @@ def process_job(config, job):
     job_script.write_text(template.replace("__PARAMS_PATH__", json.dumps(str(params_path))), encoding="utf-8")
     error_path = Path(str(params_path) + ".error")
     prepared_mode = prepare_project(config, job_script, temporary_project, error_path, project_dir / "prepared.mode")
-    if prepared_mode == "open":
-        render_project = Path(config["project_path"])
-        reuse = True
-    else:
-        render_project = temporary_project
-        reuse = False
-    if not render_project.exists():
+    if prepared_mode != "open":
         details = error_path.read_text(encoding="utf-8").strip() if error_path.exists() else "нет отчета об ошибке JSX"
-        raise RenderWorkerError("JSX не создал временный проект {}. {}".format(temporary_project, details))
+        raise RenderWorkerError("Задание требует открытый проект '{}'. {}".format(config["project_path"], details))
     output_path = resolve_output(config, job)
     prepared_comp_name = project_dir / "prepared_comp_name.txt"
     if job["kind"] == "plaque" and prepared_comp_name.exists():
@@ -347,19 +433,9 @@ def process_job(config, job):
             output_path = Path(config["routes"]["plaque_output_dir"]).expanduser() / (safe_file_name(comp_name) + ".mov")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ae_render_queue.update_job(config["queue_path"], job["id"], status="rendering", output_path=str(output_path))
-    aerender_path = Path(config["aerender_bin"])
-    if config.get("aerender_working_dir"):
-        aerender_command = ["./" + aerender_path.name]
-    else:
-        aerender_command = [str(aerender_path)]
-    if reuse:
-        ensure_renderer_available(config)
-        print("[worker] Проект открыт: запускаю подготовленную Render Queue внутри After Effects.", flush=True)
-        render_open_queue(params_path, project_dir)
-    else:
-        ensure_renderer_available(config)
-        aerender_command.extend(["-project", str(render_project)])
-        run_command(aerender_command, "aerender", cwd=config.get("aerender_working_dir"))
+    ensure_renderer_available(config)
+    print("[worker] Проект открыт: запускаю подготовленную Render Queue внутри After Effects.", flush=True)
+    render_open_queue(params_path, project_dir)
     if not staged_output_path.exists():
         raise RenderWorkerError("Рендер завершился без файла {}".format(staged_output_path))
     shutil.copy2(str(staged_output_path), str(output_path))
@@ -370,6 +446,15 @@ def run_once(config):
     job = ae_render_queue.claim_next(config["queue_path"], config.get("job_lease_seconds", ae_render_queue.DEFAULT_LEASE_SECONDS))
     if not job:
         return False
+    if not job_matches_active_shift(config, job):
+        ae_render_queue.update_job(
+            config["queue_path"],
+            job["id"],
+            status="cancelled",
+            error="Смена задания не совпадает с active_shift; рендер пропущен.",
+        )
+        print("Пропущено задание {}: неактивная смена {}.".format(job["id"], (job.get("payload") or {}).get("shift", "")), flush=True)
+        return True
     try:
         output_path = process_job(config, job)
         ae_render_queue.update_job(config["queue_path"], job["id"], status="done", output_path=str(output_path), error="")
@@ -388,6 +473,11 @@ def run_once(config):
             return False
         ae_render_queue.update_job(config["queue_path"], job["id"], status="error", error=str(exc))
         print("Ошибка задания {}: {}".format(job["id"], exc), file=sys.stderr, flush=True)
+    finally:
+        try:
+            cleanup_job_dir(config, job)
+        except OSError as cleanup_error:
+            print("[worker] Не удалось убрать временные файлы задания {}: {}".format(job["id"], cleanup_error), file=sys.stderr, flush=True)
     return True
 
 

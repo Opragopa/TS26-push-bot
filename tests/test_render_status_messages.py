@@ -31,6 +31,15 @@ class RenderStatusMessageTests(unittest.TestCase):
 
         self.assertIn("уже был выполнен", message)
 
+    def test_wrong_project_message(self):
+        message = tg_sheet_monitor.plaque_render_message({
+            "status": "error",
+            "code": "wrong_project",
+            "error": "Откройте в After Effects проект '/tmp/source.aep'. Сейчас открыт другой проект.",
+        })
+
+        self.assertIn("Переключитесь", message)
+
 
 if __name__ == "__main__":
     unittest.main()

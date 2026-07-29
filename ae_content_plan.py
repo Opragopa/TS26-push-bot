@@ -58,7 +58,11 @@ SHEET_TABS = [
 ROLE_RE = re.compile(r"(?is)(Эксперты?|Эксперт|Гости|Спикеры?|Спикер|Модератор|Ведущий)\s*:\s*")
 STOP_RE = re.compile(r"(?is)(?:^|\s)(?:▶\s*)?(?:Статус|СЦЕНАРИЙ(?:\s+ДЛЯ\s+РПГ)?|ЗАЛ|СЕТАП|РАЙДЕР|КОНТЕНТ|ВОЛОНТЕРЫ|Техзапрос|Техзадание|Место)\s*:")
 SERVICE_RE = re.compile(r"(?i)^(перерыв|обед|ужин|завтрак|зарядка|отъезд|подъ[её]м|рефлексия|креатон(?:\s*-.*)?|\d+)$")
-NAME_RE = re.compile(r"((?:[А-ЯЁA-Z]\.\s*){1,3}[А-ЯЁA-Z]?\.\s*[А-ЯЁA-Z][а-яё-]+|[А-ЯЁ][а-яё-]+\s+[А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+)?)")
+NAME_WORD_RE = r"(?:[А-ЯЁA-Z][а-яёa-z-]+|[А-ЯЁA-Z]{2,}(?:[-'][А-ЯЁA-Z]+)?)"
+NAME_RE = re.compile(
+    r"((?:[А-ЯЁA-Z]\.\s*){{1,3}}[А-ЯЁA-Z]?\.\s*[А-ЯЁA-Z][а-яёa-z-]+|"
+    r"{}\s+{}(?:\s+{})?)".format(NAME_WORD_RE, NAME_WORD_RE, NAME_WORD_RE)
+)
 POSITION_WORDS = {
     "председатель", "заместитель", "директор", "руководитель", "программный",
     "куратор", "министр", "эксперт", "модератор", "ведущий", "ректор",
@@ -440,6 +444,32 @@ def apply_llm_correction(parsed, correction, confidence_threshold):
             "role": inline_text(item.get("role", "")) or "Спикер",
             "normalized_name": normalize_key(name),
         })
+    regular_people = parsed.get("people") or []
+    regular_by_given_name = {
+        normalize_key(str(item.get("name", "")).split()[1]): item
+        for item in regular_people
+        if len(str(item.get("name", "")).split()) >= 2
+    }
+    if not people and regular_by_given_name:
+        for item in correction.get("people") or []:
+            raw_name = inline_text(item.get("name", "")) if isinstance(item, dict) else ""
+            raw_parts = raw_name.split()
+            regular = regular_by_given_name.get(normalize_key(raw_name)) if len(raw_parts) == 1 else None
+            if regular:
+                people.append(dict(regular))
+                warnings.append("Сохранено полное ФИО из регулярного парсера: LLM вернула только имя.")
+                break
+    if people and regular_people:
+        for index, person in enumerate(people):
+            candidate_parts = person["name"].split()
+            if len(candidate_parts) != 1:
+                continue
+            regular = regular_by_given_name.get(normalize_key(candidate_parts[0]))
+            if regular:
+                people[index] = dict(regular)
+                warnings.append(
+                    "Сохранено полное ФИО из регулярного парсера: LLM вернула только имя."
+                )
     if people:
         result["people"] = people
     return result, True, confidence, warnings

@@ -13,6 +13,14 @@ SAMPLE_TSV = """ВРЕМЯ\tАмфитеатр\tУРАЛ 1 (синий) (200 м�
 """
 
 
+class PersonNameParsingTests(unittest.TestCase):
+    def test_person_name_with_ich_surname_is_not_truncated(self):
+        for value in ("Кастюкевич Игорь", "КАСТЮКЕВИЧ ИГОРЬ", "Кастюкевич Игорь Юрьевич"):
+            person = ae_content_plan.parse_person(value)
+            self.assertIsNotNone(person)
+            self.assertEqual(value, person["name"])
+
+
 class FakeWorksheet:
     def __init__(self, title):
         self.title = title
@@ -167,6 +175,33 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(records["badges"][0]["Должность"], "Заместитель руководителя Росмолодежи")
         self.assertEqual(records["badges"][1]["Должность"], "программный директор форума")
 
+    def test_llm_cannot_reduce_surname_to_given_name(self):
+        parsed = {
+            "topic": "Тема",
+            "description": "",
+            "format": "",
+            "people": [{
+                "name": "Кастюкевич Игорь",
+                "position": "Директор",
+                "role": "Спикер",
+                "normalized_name": "кастюкевичигорь",
+            }],
+        }
+        corrected, applied, _, warnings = ae_content_plan.apply_llm_correction(
+            parsed,
+            {
+                "topic": "Тема",
+                "description": "",
+                "format": "",
+                "people": [{"name": "Игорь", "position": "Директор", "role": "Спикер"}],
+                "confidence": 0.95,
+            },
+            0.82,
+        )
+        self.assertTrue(applied)
+        self.assertEqual("Кастюкевич Игорь", corrected["people"][0]["name"])
+        self.assertTrue(any("полное ФИО" in warning for warning in warnings))
+
     def test_badge_with_warning_is_not_motion_ready(self):
         sample_tsv = """ВРЕМЯ\tАмфитеатр\tУРАЛ 1 (синий) (200 мест)\tУРАЛ 2 (красный) (200 мест)
 ДЕНЬ 1  ·  20.07  ·  [ТЕМА: Тест]
@@ -230,6 +265,19 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(sessions_values[0], ae_content_plan.LEGACY_SESSION_FIELDS)
         self.assertEqual(client.created, [monitor.AE_READY_SPREADSHEET_TITLE])
 
+    def test_ae_ready_sync_does_not_enqueue_session_topics_by_default(self):
+        client = FakeClient()
+        state = {}
+        rows = ae_content_plan.parse_table_rows(SAMPLE_TSV)
+        current = {"hash": "newhash", "cells": rows, "rows": len(rows), "bytes": len(SAMPLE_TSV)}
+        reference = {"hash": "reference", "cells": [["ФИО спикера", "Должность"]]}
+
+        with mock.patch.object(monitor, "fetch_sheet", side_effect=[current, reference]), mock.patch.object(monitor, "get_google_client", return_value=client), mock.patch.object(monitor, "build_ae_llm_corrector", return_value=None), mock.patch.object(monitor, "sync_ae_ready_badges_to_motion_sheet", return_value={"synced": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}), mock.patch.object(monitor.ae_render_queue, "enqueue") as enqueue:
+            result = monitor.run_ae_ready_sync(self.args, state, force=True)
+
+        self.assertEqual(0, result["queued_session_topics"])
+        enqueue.assert_not_called()
+
     def test_sync_high_confidence_badges_to_motion_sheet(self):
         records = {
             "badges": [
@@ -239,13 +287,22 @@ class AEReadyContentPlanTests(unittest.TestCase):
             ]
         }
 
-        with mock.patch.object(monitor, "write_plaque_to_sheet", return_value={"action": "created"}) as write:
+        worksheet = mock.Mock()
+        worksheet.get_all_values.return_value = []
+        with mock.patch.object(monitor, "get_plaque_worksheet", return_value=worksheet), mock.patch.object(monitor, "write_plaque_to_sheet", return_value={"action": "created", "row": 280}) as write:
             result = monitor.sync_ae_ready_badges_to_motion_sheet(records)
 
         self.assertEqual(result["synced"], 1)
         self.assertEqual(result["created"], 1)
         self.assertEqual(result["skipped"], 2)
-        write.assert_called_once_with("Иванов Иван", "Директор", note_text=monitor.AE_READY_PLAQUE_NOTE_TEXT)
+        write.assert_called_once_with(
+            "Иванов Иван",
+            "Директор",
+            note_text=monitor.AE_READY_PLAQUE_NOTE_TEXT,
+            worksheet=worksheet,
+            values=mock.ANY,
+            verify=False,
+        )
 
     def test_state_source_url_overrides_env_default(self):
         state = {monitor.AE_READY_STATE_KEY: {"source_url": "https://docs.google.com/spreadsheets/d/custom/edit?gid=1"}}

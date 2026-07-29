@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import urllib.parse
 import uuid
 from pathlib import Path
 
@@ -56,7 +57,8 @@ def auth_client(config):
 def ae_ready_spreadsheet_id(config):
     explicit = str(config.get("ae_ready_spreadsheet_id") or os.environ.get("AE_READY_SPREADSHEET_ID", "")).strip()
     if explicit:
-        return explicit
+        match = re.search(r"/spreadsheets/d/([^/]+)", urllib.parse.urlparse(explicit).path)
+        return match.group(1) if match else explicit
     state_path = str(config.get("ae_ready_state_path", "")).strip()
     if not state_path:
         return ""
@@ -70,7 +72,9 @@ def ae_ready_spreadsheet_id(config):
     except (OSError, ValueError):
         return ""
     data = state.get("_ae_ready_content_plan") or {}
-    return str(data.get("spreadsheet_id") or "").strip()
+    saved = str(data.get("spreadsheet_id") or "").strip()
+    match = re.search(r"/spreadsheets/d/([^/]+)", urllib.parse.urlparse(saved).path)
+    return match.group(1) if match else saved
 
 
 def worksheet_by_gid(spreadsheet, gid):
@@ -96,8 +100,22 @@ def configured_shift_by_day(config):
     )
     for shifts in candidates:
         if any(normalize(value) for value in shifts.values()):
+            active_shift = normalize(config.get("active_shift") or os.environ.get("AE_ACTIVE_SHIFT", ""))
+            if active_shift:
+                return {str(day): active_shift for day in shifts if normalize(day)}
             return shifts
     return {}
+
+
+def active_shift(config):
+    return normalize(config.get("active_shift") or os.environ.get("AE_ACTIVE_SHIFT", ""))
+
+
+def session_topics_auto_render_enabled(config):
+    value = config.get("session_topics_auto_render")
+    if value is None:
+        value = os.environ.get("AE_RENDER_SESSION_TOPICS_ENABLED", "false")
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def stable_fallback_plaque_id(name, position):
@@ -180,13 +198,16 @@ def enqueue_session_jobs(client, config):
     if any(name not in indexes for name in required):
         raise RuntimeError("В AE-ready не хватает колонок: {}".format(", ".join(name for name in required if name not in indexes)))
     shifts = configured_shift_by_day(config)
+    selected_shift = active_shift(config)
     created = 0
     for row_number, row in enumerate(rows[1:], start=2):
         data = {name: normalize(row[indexes[name]] if len(row) > indexes[name] else "") for name in required}
         day_match = re.search(r"\d+", data["ДЕНЬ"])
         day = day_match.group(0) if day_match else ""
         shift = normalize(shifts.get(day, ""))
-        if not day or not shift or not data["ТЕМА"] or not data["ОПИСАНИЕ"]:
+        if selected_shift and shift != selected_shift:
+            continue
+        if not day or not shift or not data["ТЕМА"]:
             continue
         key = "sheet-session:{}:{}:{}".format(row_number, shift, fingerprint(data["ТЕМА"], data["ОПИСАНИЕ"], data["ПЛОЩАДКА"]))
         _, was_created = ae_render_queue.enqueue(
@@ -204,6 +225,13 @@ def poll(config):
     plaque_result = enqueue_plaque_jobs(client, config)
     session_topics = 0
     session_error = ""
+    if not session_topics_auto_render_enabled(config):
+        return {
+            "plaques": plaque_result["created"],
+            "session_topics": 0,
+            "session_error": "Автоматический рендер тем сессий отключен для ручной проверки.",
+            "plaque_sync": sync_missing_plaques(config, plaque_result["active_ids"]),
+        }
     spreadsheet_id = ae_ready_spreadsheet_id(config)
     if spreadsheet_id:
         session_config = dict(config)
@@ -212,6 +240,8 @@ def poll(config):
             session_topics = enqueue_session_jobs(client, session_config)
         except Exception as exc:
             session_error = str(exc)
+    else:
+        session_error = "Не задан ae_ready_spreadsheet_id: темы сессий не могут попасть в очередь. Получите ссылку командой /ae_link и внесите ID в ae_render_config.json."
     return {
         "plaques": plaque_result["created"],
         "session_topics": session_topics,

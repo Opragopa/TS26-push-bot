@@ -1,6 +1,6 @@
 /*
- * Receives a JSON job from ae_render_worker.py, changes a temporary copy of
- * the project, and puts exactly one item into its Render Queue.
+ * Receives a JSON job from ae_render_worker.py, changes the open project, and
+ * puts exactly one item into its Render Queue.
  */
 (function () {
     if (typeof app === "undefined") {
@@ -198,7 +198,12 @@
         if (!source.exists) fail("Не найден исходный проект: " + source.fsName);
         app.beginSuppressDialogs();
         var useOpenProject = params.use_open_project === true && app.project && app.project.file && normalizedPath(app.project.file) === normalizedPath(source);
+        if (!useOpenProject && params.require_open_project === true) {
+            fail("Откройте проект '" + source.fsName + "' перед запуском рендера.");
+        }
         if (!useOpenProject) app.open(source);
+        // Always discard stale queue items before the generator adds the new one.
+        clearRenderQueue();
         var comp;
         if (params.kind === "plaque") {
             comp = generatePlaque(params);
@@ -209,17 +214,13 @@
         }
         if (!comp) fail("Не найдена композиция для задания '" + params.kind + "'.");
         writeText(new File(params.prepared_comp_name_path), comp.name);
-        if (useOpenProject) {
-            writeText(new File(params.prepared_marker_path), "open");
-        } else {
-            app.project.save(new File(params.temporary_project_path));
-            writeText(new File(params.prepared_marker_path), "temp");
-            app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);
-        }
+        writeText(new File(params.prepared_marker_path), "open");
     } catch (error) {
         writeFailure(error && error.toString ? error.toString() : error);
         try {
-            if (app.project && !useOpenProject) app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);
+            if (app.project && !useOpenProject && params.require_open_project !== true) {
+                app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);
+            }
         } catch (closeError) {}
     }
 }());
