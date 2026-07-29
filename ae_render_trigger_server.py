@@ -3,6 +3,7 @@
 """Small HTTP trigger for local AE rendering without continuous sheet polling."""
 
 import argparse
+import fcntl
 import hmac
 import ipaddress
 import json
@@ -20,6 +21,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = SCRIPT_DIR / "ae_render_config.json"
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_FIELD_CHARS = 500
+DEFAULT_LOCK_PATH = Path.home() / "Documents" / "tg_sheet_monitor" / "ae_render_trigger.lock"
 
 _worker_lock = threading.Lock()
 
@@ -32,6 +34,31 @@ def is_loopback_host(host):
         return ipaddress.ip_address(text).is_loopback
     except ValueError:
         return False
+
+
+def acquire_singleton_lock(lock_path):
+    """Hold an exclusive non-blocking process lock for the trigger lifetime."""
+    path = Path(lock_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    lock_stream = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_stream.close()
+        raise SystemExit("AE render trigger уже запущен. Lock занят: {}".format(path))
+    lock_stream.seek(0)
+    lock_stream.truncate()
+    lock_stream.write(str(os.getpid()))
+    lock_stream.flush()
+    try:
+        os.fchmod(lock_stream.fileno(), 0o600)
+    except OSError:
+        pass
+    return lock_stream
 
 
 def has_queued_jobs(queue_path):
@@ -89,7 +116,12 @@ def trigger_worker(config, retry_interval):
     thread.start()
 
 
-def enqueue_payload(config, payload):
+def validate_payload(payload):
+    """Check the request shape and return the normalized fields.
+
+    Kept separate from enqueue_payload so the handler can reject bad input before
+    touching After Effects, and so the rules are unit-testable on their own.
+    """
     if not isinstance(payload, dict):
         raise ValueError("тело запроса должно быть JSON-объектом")
     kind = str(payload.get("kind") or "plaque").strip()
@@ -107,6 +139,15 @@ def enqueue_payload(config, payload):
     source_key = str(payload.get("source_key") or "").strip()
     if len(source_key) > MAX_FIELD_CHARS:
         raise ValueError("поле source_key слишком длинное")
+    return {"name": name, "position": position, "row": row, "source_key": source_key}
+
+
+def enqueue_payload(config, payload):
+    fields = validate_payload(payload)
+    name = fields["name"]
+    position = fields["position"]
+    row = fields["row"]
+    source_key = fields["source_key"]
     if not source_key:
         source_key = "trigger-plaque:{}:{}:{}".format(row or "no-row", name, position)
     job, created = ae_render_queue.enqueue(
@@ -185,6 +226,13 @@ class TriggerHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError) as exc:
             self.send_json(400, {"ok": False, "error": "некорректный запрос: {}".format(exc)})
             return
+        # Validate the payload before the AE state check: a malformed request should
+        # be told what is wrong with it, not "open the project in After Effects".
+        try:
+            validate_payload(payload)
+        except ValueError as exc:
+            self.send_json(400, {"ok": False, "error": str(exc)})
+            return
         try:
             project_error = ae_render_worker.expected_project_error(self.server.config)
             if project_error:
@@ -217,6 +265,7 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=int(os.environ.get("AE_RENDER_TRIGGER_PORT", "8765")))
     parser.add_argument("--token", default=os.environ.get("AE_RENDER_TRIGGER_TOKEN", ""))
     parser.add_argument("--retry-interval", type=int, default=int(os.environ.get("AE_RENDER_TRIGGER_RETRY_INTERVAL", "60")))
+    parser.add_argument("--lock-path", default=os.environ.get("AE_RENDER_TRIGGER_LOCK_PATH", str(DEFAULT_LOCK_PATH)))
     args = parser.parse_args(argv)
 
     token = str(args.token or "").strip()
@@ -232,6 +281,7 @@ def main(argv=None):
             flush=True,
         )
 
+    lock_stream = acquire_singleton_lock(args.lock_path)
     config = ae_render_worker.load_config(args.config)
     recovered = ae_render_queue.recover_expired_jobs(config["queue_path"])
     if recovered:
@@ -240,6 +290,7 @@ def main(argv=None):
     server.config = config
     server.trigger_token = token
     server.retry_interval = args.retry_interval
+    server.singleton_lock_stream = lock_stream
     print("[trigger] listening on http://{}:{}".format(args.host, args.port), flush=True)
     server.serve_forever()
 
