@@ -3277,15 +3277,16 @@ def handle_plaque_message(args, sheets, state, message):
     if args.no_plaque_form:
         return False
     chat = message.get("chat") or {}
-    chat_id = chat.get("id")
+    from_user = message.get("from") or {}
+    chat_id, _user_id = actor_ids(chat, from_user)
     raw_text = (message.get("text") or "").strip()
     text = normalize_space(raw_text)
     if not chat_id or not text:
         return False
+    allowed = is_authorized_actor(chat, from_user, lambda value: can_use_plaque_form(sheets, state, value))
     command = text.split()[0].split("@", 1)[0].lower() if text.startswith("/") else ""
     if command == "/start" or text.casefold() == HELP_BUTTON_TEXT.casefold():
         clear_plaque_session(state, chat_id)
-        allowed = can_use_plaque_form(sheets, state, chat_id)
         send_start_screen(
             args,
             chat_id,
@@ -3295,11 +3296,17 @@ def handle_plaque_message(args, sheets, state, message):
         )
         return True
     if command:
-        if can_use_plaque_form(sheets, state, chat_id):
+        if allowed:
             send_plain_chat_message(args, chat_id, "TS26: команда не нужна", "Используйте кнопки внизу чата. Для начала нажмите «Добавить плашку».", reply_markup=plaque_reply_keyboard())
-            return True
-        return False
-    if not can_use_plaque_form(sheets, state, chat_id):
+        else:
+            send_plain_chat_message(
+                args,
+                chat_id,
+                "TS26: нет доступа",
+                "Эта команда недоступна для вашего чата.\nНажмите /start, чтобы посмотреть, что доступно.",
+            )
+        return True
+    if not allowed:
         return False
     session = plaque_sessions(state).get(str(chat_id), {})
     if text.casefold() == PLAQUE_ADD_BUTTON_TEXT.casefold():
@@ -3360,15 +3367,23 @@ def poll_admin_updates(args, sheets, state):
             if "callback_query" in update:
                 callback = update["callback_query"]
                 changed = remember_chat(state, callback.get("message", {}).get("chat") or callback.get("from") or {}) or changed
-                changed = handle_admin_callback(args, sheets, state, callback) or changed
-                changed = handle_plaque_callback(args, sheets, state, callback) or changed
+                # Each handler ignores callback data outside its own "dbg:"/"plq:"
+                # namespace, so stop as soon as one of them claims the update.
+                if handle_admin_callback(args, sheets, state, callback):
+                    changed = True
+                elif handle_plaque_callback(args, sheets, state, callback):
+                    changed = True
             elif "message" in update:
                 message = update["message"]
                 changed = remember_chat(state, message.get("chat") or {}) or changed
-                changed = handle_admin_message(args, sheets, state, message) or changed
-                changed = handle_plaque_message(args, sheets, state, message) or changed
+                if handle_admin_message(args, sheets, state, message):
+                    changed = True
+                elif handle_plaque_message(args, sheets, state, message):
+                    changed = True
         except (MonitorError, ConfigError) as exc:
             log("Ошибка обработки Telegram-команды: {}".format(exc))
+        except Exception as exc:  # noqa: BLE001 - one bad update must not stop polling
+            log("Непредвиденная ошибка обработки Telegram-обновления {}: {!r}".format(update_id, exc))
     return changed
 
 
