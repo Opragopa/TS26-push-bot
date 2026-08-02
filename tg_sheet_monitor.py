@@ -65,6 +65,7 @@ DEFAULT_DATA_DIR = Path(os.environ.get("SHEET_MONITOR_DATA_DIR") or os.environ.g
 DEFAULT_STATE_PATH = DEFAULT_DATA_DIR / "sheet_state.json"
 DEFAULT_SHEETS_PATH = Path(__file__).resolve().parent / "sheets.json"
 DEFAULT_INTERVAL_SECONDS = int(os.environ.get("SHEET_MONITOR_INTERVAL", "120"))
+CONTENT_PLAN_DELIVERY_RETRY_SECONDS = int(os.environ.get("CONTENT_PLAN_DELIVERY_RETRY_SECONDS", "300"))
 DEFAULT_DURATION_SECONDS = int(os.environ.get("SHEET_MONITOR_DURATION_SECONDS", "0"))
 DEFAULT_NOTIFY_INITIAL = env_bool("SHEET_MONITOR_NOTIFY_INITIAL", False)
 DEFAULT_STARTUP_MESSAGE = env_bool("SHEET_MONITOR_STARTUP_MESSAGE", False)
@@ -109,6 +110,9 @@ ADMIN_BOT_COMMANDS = [
     {"command": "ae_warnings", "description": "Warnings AE-ready"},
     {"command": "ae_source", "description": "Источник Контент-плана"},
     {"command": "ae_rebuild", "description": "Пересоздать AE-ready"},
+    {"command": "figma", "description": "Настройка Figma"},
+    {"command": "render_status", "description": "Очередь рендера"},
+    {"command": "render_retry", "description": "Повторить неудачные рендеры"},
     {"command": "google_access", "description": "Проверить Google-доступ"},
     {"command": "test_content", "description": "Тест Контент-план"},
     {"command": "test_recording", "description": "Тест План записи"},
@@ -116,19 +120,16 @@ ADMIN_BOT_COMMANDS = [
     {"command": "user_mode", "description": "Режим пользователя"},
 ]
 AE_READY_STATE_KEY = "_ae_ready_content_plan"
-AE_READY_SOURCE_URL = os.environ.get("AE_READY_SOURCE_URL", "https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400")
-AE_POSITION_REFERENCE_URL = os.environ.get(
-    "AE_POSITION_REFERENCE_URL",
-    "https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=0#gid=0",
-)
+AE_READY_SOURCE_URL = os.environ.get("AE_READY_SOURCE_URL", "")
+AE_POSITION_REFERENCE_URL = os.environ.get("AE_POSITION_REFERENCE_URL", "")
 AE_READY_SPREADSHEET_TITLE = os.environ.get("AE_READY_SPREADSHEET_TITLE", "TS26 AE-ready Content Plan")
 AE_READY_CONFIDENCE_THRESHOLD = env_float("AI_CORRECTION_CONFIDENCE_THRESHOLD", 0.82)
 AE_READY_PLAQUE_SYNC_ENABLED = env_bool("AE_READY_PLAQUE_SYNC_ENABLED", True)
 AE_READY_PLAQUE_CONFIDENCE_THRESHOLD = env_float("AE_READY_PLAQUE_CONFIDENCE_THRESHOLD", 0.9)
 AE_READY_PLAQUE_NOTE_TEXT = os.environ.get("AE_READY_PLAQUE_NOTE_TEXT", "<-- добавлено из AE-ready")
 DIFF_BOUNDARY_CHARS = " \t,.;:!?-–—()[]{}«»\"'"
-PLAQUE_SPREADSHEET_ID = os.environ.get("PLAQUE_SPREADSHEET_ID", "1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js")
-PLAQUE_WORKSHEET_GID = int(os.environ.get("PLAQUE_WORKSHEET_GID", "1399617264"))
+PLAQUE_SPREADSHEET_ID = os.environ.get("PLAQUE_SPREADSHEET_ID", "")
+PLAQUE_WORKSHEET_GID = int(os.environ.get("PLAQUE_WORKSHEET_GID", "0"))
 PLAQUE_WORKSHEET_TITLE = os.environ.get("PLAQUE_WORKSHEET_TITLE", "МОУШЕН")
 PLAQUE_START_ROW = int(os.environ.get("PLAQUE_START_ROW", "280"))
 PLAQUE_NAME_COL = int(os.environ.get("PLAQUE_NAME_COL", "1"))
@@ -1396,6 +1397,17 @@ def flush_content_plan_digest(args, sheets, state, moment=None):
     events = digest.get("events") or []
     last_flush_hour = digest.get("last_flush_hour")
 
+    # Keep a failed package queued, but do not hammer Telegram/AI every monitor
+    # tick. The admin can see the last error in /status.
+    last_attempt_at = digest.get("last_attempt_at")
+    if events and last_attempt_at:
+        try:
+            attempt_time = _dt.datetime.fromisoformat(str(last_attempt_at))
+            if (_dt.datetime.now() - attempt_time).total_seconds() < max(30, CONTENT_PLAN_DELIVERY_RETRY_SECONDS):
+                return False
+        except ValueError:
+            pass
+
     if not events:
         if last_flush_hour != current_hour:
             digest["last_flush_hour"] = current_hour
@@ -1425,6 +1437,9 @@ def flush_content_plan_digest(args, sheets, state, moment=None):
         log("AI-сводка Контент-плана не получена: {}".format(exc))
 
     chat_ids = recipient_chat_ids(content_sheet, state=state)
+    digest["last_attempt_at"] = now_text()
+    digest["last_attempt_hour"] = current_hour
+    digest["last_error"] = ""
     chunks = 0
     summary_body = "{}\nКоротко за час\n{}\n{}".format(TELEGRAM_QUOTE_START, ai_summary, TELEGRAM_QUOTE_END) if ai_summary else "AI-сводка недоступна.\nПолный diff отправляется отдельным сообщением."
     try:
@@ -1451,11 +1466,13 @@ def flush_content_plan_digest(args, sheets, state, moment=None):
         )
     except (MonitorError, ConfigError) as exc:
         log("Не удалось отправить почасовой пакет Контент-плана: {}".format(exc))
+        digest["last_error"] = str(exc)
         return False
 
     digest["events"] = []
     digest["last_flush_hour"] = current_hour
     digest["last_sent_at"] = now_text()
+    digest["last_error"] = ""
     log("Почасовой пакет Контент-плана отправлен: событий {}, строк diff {}, сообщений {}.".format(event_count, change_count, chunks))
     return True
 
@@ -1648,6 +1665,7 @@ def admin_keyboard(section="home"):
                 {"text": "Warnings", "callback_data": "dbg:ae_warnings"},
                 {"text": "Ссылка", "callback_data": "dbg:ae_link"},
             ],
+            [{"text": "Настройка Figma", "callback_data": "dbg:figma"}],
             [{"text": "Назад", "callback_data": "dbg:home"}],
         ]
     elif section == "user_tools":
@@ -1815,9 +1833,9 @@ def content_access_report(state):
         "Последние пользователи:\n"
         "{}\n\n"
         "Добавить:\n"
-        "/add_content_user 415835819\n\n"
+        "/add_content_user 123456789\n\n"
         "Удалить:\n"
-        "/remove_content_user 415835819\n\n"
+        "/remove_content_user 123456789\n\n"
         "Показать список:\n"
         "/content_users\n\n"
         "Человек должен хотя бы один раз написать боту, иначе Telegram может запретить отправку."
@@ -1867,9 +1885,9 @@ def plaque_access_report(state):
         "Последние пользователи:\n"
         "{}\n\n"
         "Добавить:\n"
-        "/add_plaque_user 415835819\n\n"
+        "/add_plaque_user 123456789\n\n"
         "Удалить:\n"
-        "/remove_plaque_user 415835819\n\n"
+        "/remove_plaque_user 123456789\n\n"
         "Показать список:\n"
         "/plaque_users\n\n"
         "Человек должен хотя бы один раз написать боту, иначе Telegram может запретить отправку."
@@ -1878,12 +1896,16 @@ def plaque_access_report(state):
 
 def status_report(args, sheets, state):
     active_user_modes = len(user_mode_chats(state))
+    interval = getattr(args, "interval", DEFAULT_INTERVAL_SECONDS)
+    duration = getattr(args, "duration", 0)
+    no_admin_buttons = getattr(args, "no_admin_buttons", False)
+    no_plaque_form = getattr(args, "no_plaque_form", False)
     lines = [
         "Версия: {}".format(APP_VERSION),
-        "Интервал: {} сек.".format(args.interval),
-        "Длительность: {} сек.".format(args.duration) if args.duration else "Длительность: без ограничения",
-        "Админ-кнопки: {}".format("включены" if not args.no_admin_buttons else "выключены"),
-        "Форма плашек: {}".format("включена" if not args.no_plaque_form else "выключена"),
+        "Интервал: {} сек.".format(interval),
+        "Длительность: {} сек.".format(duration) if duration else "Длительность: без ограничения",
+        "Админ-кнопки: {}".format("включены" if not no_admin_buttons else "выключены"),
+        "Форма плашек: {}".format("включена" if not no_plaque_form else "выключена"),
         "Пользовательский режим админов: {}".format(active_user_modes),
     ]
     for sheet in sheets:
@@ -1891,7 +1913,27 @@ def status_report(args, sheets, state):
         checked = saved.get("checked_at") or "еще не проверялась"
         rows = saved.get("rows", "н/д")
         error = saved.get("error") or "нет"
-        lines.append("{}: строк {}, проверка {}, ошибка: {}".format(sheet["label"], rows, checked, error))
+        changed = saved.get("last_change_at") or "не зафиксировано"
+        delivery = saved.get("last_notification_at") or "не отправлялось"
+        lines.append("{}: строк {}, проверка {}, последнее изменение {}, уведомление {}, ошибка: {}".format(
+            sheet["label"], rows, checked, changed, delivery, error
+        ))
+
+    content_sheet = next((sheet for sheet in sheets if is_content_plan_sheet(sheet)), None)
+    if content_sheet:
+        digest = content_plan_digest_state(state)
+        events = digest.get("events") or []
+        pending_lines = sum(int(event.get("change_count") or 0) for event in events)
+        lines.extend([
+            "",
+            "Почасовые уведомления Контент-плана:",
+            "В очереди: событий {}, строк diff {}.".format(len(events), pending_lines),
+            "Получатели: {}".format(", ".join(recipient_chat_ids(content_sheet, state=state)) or "не заданы"),
+            "Последняя попытка: {}.".format(digest.get("last_attempt_at") or "не было"),
+            "Последняя отправка: {}.".format(digest.get("last_sent_at") or "не было"),
+            "Ошибка доставки: {}.".format(digest.get("last_error") or "нет"),
+            "Повтор после ошибки: раз в {} сек.".format(max(30, CONTENT_PLAN_DELIVERY_RETRY_SECONDS)),
+        ])
     return "\n".join(lines)
 
 
@@ -2036,6 +2078,8 @@ def handle_admin_callback(args, sheets, state, callback):
         send_admin_message(args, chat_id, "TS26: AE-ready ссылка", ae_ready_url(spreadsheet_id) if spreadsheet_id else "AE-ready таблица еще не создана. Запустите sync.", reply_markup=admin_keyboard("ae"))
     elif data == "dbg:ae_warnings":
         send_admin_message(args, chat_id, "TS26: AE-ready warnings", ae_warnings_report(state), reply_markup=admin_keyboard("ae"))
+    elif data == "dbg:figma":
+        send_admin_message(args, chat_id, "TS26: Figma", figma_setup_report(state), reply_markup=admin_keyboard("ae"))
     elif data == "dbg:ae_sync":
         try:
             result = run_ae_ready_sync(args, state, force=True, rebuild=False)
@@ -2126,6 +2170,8 @@ def handle_admin_message(args, sheets, state, message):
         send_admin_message(args, chat_id, "TS26: AE-ready ссылка", ae_ready_url(spreadsheet_id) if spreadsheet_id else "AE-ready таблица еще не создана. Запустите /ae_sync.", reply_markup=admin_keyboard())
     elif command == "/ae_warnings":
         send_admin_message(args, chat_id, "TS26: AE-ready warnings", ae_warnings_report(state), reply_markup=admin_keyboard())
+    elif command == "/figma":
+        send_admin_message(args, chat_id, "TS26: Figma", figma_setup_report(state), reply_markup=admin_keyboard("ae"))
     elif command in {"/ae_sync", "/ae_rebuild"}:
         try:
             result = run_ae_ready_sync(args, state, force=True, rebuild=command == "/ae_rebuild")
@@ -2135,7 +2181,7 @@ def handle_admin_message(args, sheets, state, message):
     elif command in {"/add_content_user", "/remove_content_user"}:
         parts = text.split()
         if len(parts) < 2:
-            send_admin_message(args, chat_id, "TS26: Контент-доступ", "Укажите chat_id.\nНапример:\n{} 415835819".format(command), reply_markup=admin_keyboard())
+            send_admin_message(args, chat_id, "TS26: Контент-доступ", "Укажите chat_id.\nНапример:\n{} 123456789".format(command), reply_markup=admin_keyboard())
             return True
         try:
             target_chat_id = add_content_plan_chat_id(state, parts[1]) if command == "/add_content_user" else remove_content_plan_chat_id(state, parts[1])
@@ -2154,7 +2200,7 @@ def handle_admin_message(args, sheets, state, message):
     elif command in {"/add_plaque_user", "/remove_plaque_user"}:
         parts = text.split()
         if len(parts) < 2:
-            send_admin_message(args, chat_id, "TS26: доступ к плашкам", "Укажите chat_id.\nНапример:\n{} 415835819".format(command), reply_markup=admin_keyboard())
+            send_admin_message(args, chat_id, "TS26: доступ к плашкам", "Укажите chat_id.\nНапример:\n{} 123456789".format(command), reply_markup=admin_keyboard())
             return True
         try:
             target_chat_id = add_plaque_chat_id(state, parts[1]) if command == "/add_plaque_user" else remove_plaque_chat_id(state, parts[1])
@@ -2191,6 +2237,23 @@ def handle_admin_message(args, sheets, state, message):
         )
     elif command in {"/user", "/user_mode", "/plaque_mode"}:
         send_user_mode_start(args, state, chat_id)
+    elif command in {"/render_status", "/render_queue"}:
+        send_admin_message(args, chat_id, "TS26: очередь рендера", render_queue_report(), reply_markup=admin_keyboard())
+    elif command == "/render_retry":
+        try:
+            retried = ae_render_queue.retry_failed_jobs(AE_RENDER_QUEUE_PATH)
+        except Exception as exc:  # noqa: BLE001 - surface the failure to the admin
+            send_admin_message(args, chat_id, "TS26: ошибка", "Не удалось перезапустить задания: {}".format(exc), reply_markup=admin_keyboard())
+            return True
+        if not retried:
+            message = "Неудачных заданий нет — перезапускать нечего."
+        else:
+            names = ["• {}".format((job.get("payload") or {}).get("name", "") or job.get("kind", "")) for job in retried[:10]]
+            message = "Возвращено в очередь: {}.\n\n{}".format(len(retried), "\n".join(names))
+            if len(retried) > 10:
+                message += "\n… и ещё {}".format(len(retried) - 10)
+            message += "\n\nУбедитесь, что в After Effects открыт нужный проект — воркер заберёт задания при следующем опросе."
+        send_admin_message(args, chat_id, "TS26: перезапуск рендера", message, reply_markup=admin_keyboard())
     elif command == "/google_access":
         try:
             report = google_access_report()
@@ -2691,6 +2754,21 @@ def ae_warnings_report(state, limit=12):
     return "\n".join(lines)
 
 
+def figma_setup_report(state):
+    spreadsheet_id = ae_ready_spreadsheet_id(state)
+    source = ae_ready_url(spreadsheet_id) if spreadsheet_id else "AE-ready таблица еще не создана. Сначала выполните /ae_sync."
+    return (
+        "Figma-плагин подготовлен в папке figma_plugin проекта.\n\n"
+        "1. В Figma импортируйте figma_plugin/manifest.json через Plugins -> Development.\n"
+        "2. На текущей странице назовите шаблон TS26/VIZITKA_TEMPLATE.\n"
+        "3. В шаблоне назовите слои FIO, POSITION и PHOTO.\n"
+        "4. В плагине укажите TSV-ссылку листа content_plan_cards и сначала нажмите проверку.\n"
+        "5. После ручной проверки нажмите создание / обновление.\n\n"
+        "AE-ready таблица:\n{}\n\n"
+        "ФИГМА-токен для первой версии не нужен: плагин работает в открытом вами файле и не передает доступ к Figma на хостинг."
+    ).format(source)
+
+
 def get_or_create_ae_spreadsheet(client, state, rebuild=False):
     spreadsheet_id = "" if rebuild else ae_ready_spreadsheet_id(state)
     if spreadsheet_id:
@@ -3053,7 +3131,7 @@ def write_plaque_to_sheet(name, position, note_text=PLAQUE_NOTE_TEXT, worksheet=
     }
 
 
-def enqueue_plaque_render(name, position, result):
+def enqueue_plaque_render(name, position, result, requested_by=""):
     if not AE_RENDER_ENABLED:
         return {"status": "disabled"}
     content_key = hashlib.sha256("{}\x1f{}".format(name, position).encode("utf-8")).hexdigest()[:16]
@@ -3065,6 +3143,8 @@ def enqueue_plaque_render(name, position, result):
             "position": position,
             "sheet_row": result["row"],
             "source_key": source_key,
+            # Lets the worker report the render outcome back to whoever asked for it.
+            "requested_by": str(requested_by or ""),
         }
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
@@ -3106,7 +3186,12 @@ def enqueue_plaque_render(name, position, result):
         job, created = ae_render_queue.enqueue(
             AE_RENDER_QUEUE_PATH,
             "plaque",
-            {"name": name, "position": position, "sheet_row": result["row"]},
+            {
+                "name": name,
+                "position": position,
+                "sheet_row": result["row"],
+                "requested_by": str(requested_by or ""),
+            },
             source_key=source_key,
             dedupe_statuses=ae_render_queue.USER_RETRY_DEDUPE_STATUSES,
         )
@@ -3116,6 +3201,36 @@ def enqueue_plaque_render(name, position, result):
     except (OSError, ae_render_queue.RenderQueueError) as exc:
         log("Не удалось поставить плашку в очередь: {}".format(exc))
         return {"status": "error", "error": str(exc)}
+
+
+def render_queue_report():
+    """Operator-facing summary of the local render queue."""
+    try:
+        counts, failures = ae_render_queue.queue_counts(AE_RENDER_QUEUE_PATH)
+    except Exception as exc:  # noqa: BLE001 - report instead of crashing the command
+        return "Не удалось прочитать очередь рендера: {}".format(exc)
+    lines = [
+        "Очередь: {}".format(AE_RENDER_QUEUE_PATH),
+        "Ждут: {} · Готовятся: {} · Рендерятся: {}".format(
+            counts.get("queued", 0), counts.get("preparing", 0), counts.get("rendering", 0)
+        ),
+        "Готово: {} · Ошибок: {} · Отменено: {}".format(
+            counts.get("done", 0), counts.get("error", 0), counts.get("cancelled", 0)
+        ),
+    ]
+    if AE_RENDER_TRIGGER_URL:
+        lines.append("Триггер: {}".format(AE_RENDER_TRIGGER_URL))
+    else:
+        lines.append("Триггер не настроен: бот пишет в файл очереди, воркер заберёт задание при следующем опросе.")
+    if failures:
+        lines.append("")
+        lines.append("Последние ошибки:")
+        for job in failures[:5]:
+            payload = job.get("payload") or {}
+            lines.append("• {} — {}".format(payload.get("name", "") or job.get("kind", ""), str(job.get("error", ""))[:160]))
+        lines.append("")
+        lines.append("Повторить все неудачные: /render_retry")
+    return "\n".join(lines)
 
 
 def local_render_queue_status(job_id):
@@ -3199,7 +3314,7 @@ def confirm_plaque(args, state, chat_id):
                 log("Плашка не записана: {} — {}".format(entry["name"], exc))
                 failures.append({"entry": entry, "error": str(exc)})
                 continue
-            render = enqueue_plaque_render(entry["name"], entry["position"], result)
+            render = enqueue_plaque_render(entry["name"], entry["position"], result, requested_by=chat_id)
             results.append({"entry": entry, "result": result, "render": render})
         clear_plaque_session(state, chat_id)
         created_count = sum(1 for item in results if item["result"]["action"] == "created")
@@ -3251,7 +3366,7 @@ def confirm_plaque(args, state, chat_id):
         ask_plaque_name(args, state, chat_id)
         return
     result = write_plaque_to_sheet(name, position)
-    render = enqueue_plaque_render(name, position, result)
+    render = enqueue_plaque_render(name, position, result, requested_by=chat_id)
     clear_plaque_session(state, chat_id)
     action_text = "обновлена" if result["action"] == "updated" else "добавлена"
     render_message = plaque_render_message(render)
@@ -3657,13 +3772,16 @@ def check_sheet(sheet, state, args):
         is_content_plan = is_content_plan_sheet(sheet)
         message = build_change_summary(label, previous, current, full_diff=is_content_plan)
         log("Обновление: {} ({})".format(label, message.splitlines()[0] if message else "есть изменения"))
+        current["last_change_at"] = current["checked_at"]
         if is_content_plan:
             queue_size = queue_content_plan_change(state, message, captured_at=current["checked_at"])
             log("Изменение Контент-плана добавлено в почасовую очередь: событий {}.".format(queue_size))
         else:
             if normalize_header(label) == normalize_header("План записи"):
                 notify_current_day_plate_changes(args, sheet, previous, current, state)
-            notify(args, "TS26: обновилась таблица", message, subtitle=label, url=sheet["url"], sheet=sheet, state=state)
+            delivered = notify(args, "TS26: обновилась таблица", message, subtitle=label, url=sheet["url"], sheet=sheet, state=state)
+            if delivered:
+                current["last_notification_at"] = now_text()
     elif not old_hash:
         log("Первый снимок: {} (строк: {}, {} байт)".format(label, current["rows"], current["bytes"]))
         if args.notify_initial:

@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+import ae_render_notify
 import ae_render_registry
 import ae_render_queue
 import ae_sheet_source
@@ -463,8 +464,21 @@ def process_job(config, job):
     error_path = Path(str(params_path) + ".error")
     prepared_mode = prepare_project(config, job_script, temporary_project, error_path, project_dir / "prepared.mode")
     if prepared_mode != "open":
-        details = error_path.read_text(encoding="utf-8").strip() if error_path.exists() else "нет отчета об ошибке JSX"
-        raise RenderWorkerError("Задание требует открытый проект '{}'. {}".format(config["project_path"], details))
+        details = error_path.read_text(encoding="utf-8").strip() if error_path.exists() else ""
+        # Say what is actually open, otherwise the operator only learns which project
+        # was expected and has to guess why AE refused.
+        currently_open = active_project_path(config)
+        if currently_open:
+            situation = "Сейчас в After Effects открыт: '{}'.".format(currently_open)
+        elif process_exists("After Effects"):
+            situation = "After Effects запущен, но проект не открыт."
+        else:
+            situation = "After Effects не запущен."
+        raise RenderWorkerError(
+            "Задание требует открытый проект '{}'. {} {}".format(
+                config["project_path"], situation, details or ""
+            ).strip()
+        )
     output_path = resolve_output(config, job)
     prepared_comp_name = project_dir / "prepared_comp_name.txt"
     if job["kind"] == "plaque" and prepared_comp_name.exists():
@@ -506,6 +520,8 @@ def run_once(config):
                 config.get("stale_plaque_archive_dir", "_Устаревшие AE"),
             )
         print("Готово: {}".format(output_path), flush=True)
+        # Close the loop back to Telegram: the requester is not watching this log.
+        ae_render_notify.safe_notify(ae_render_notify.notify_job_finished, job, str(output_path))
     except Exception as exc:
         if isinstance(exc, RenderWorkerBusy):
             ae_render_queue.update_job(config["queue_path"], job["id"], status="queued", error="")
@@ -513,6 +529,7 @@ def run_once(config):
             return False
         ae_render_queue.update_job(config["queue_path"], job["id"], status="error", error=str(exc))
         print("Ошибка задания {}: {}".format(job["id"], exc), file=sys.stderr, flush=True)
+        ae_render_notify.safe_notify(ae_render_notify.notify_job_failed, job, str(exc))
     finally:
         try:
             cleanup_job_dir(config, job)
@@ -556,6 +573,9 @@ def main(argv=None):
     parser.add_argument("--sync-dry-run", action="store_true", help="Показать, какие плашки были бы архивированы при исчезновении из таблицы.")
     args = parser.parse_args(argv)
     config = load_config(args.config)
+    # Telegram credentials live in .env; load them up front so render outcomes can be
+    # reported even on runs that never touch Google Sheets.
+    ae_render_notify.load_env_file(config.get("env_file", ".env"))
     recovered = ae_render_queue.recover_expired_jobs(config["queue_path"])
     if recovered:
         print("В очередь возвращено зависших заданий: {}.".format(len(recovered)), flush=True)

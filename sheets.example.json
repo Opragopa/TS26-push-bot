@@ -1,0 +1,11 @@
+[
+  {
+    "label": "Content plan",
+    "url": "https://docs.google.com/spreadsheets/d/<CONTENT_PLAN_SPREADSHEET_ID>/edit?gid=<WORKSHEET_GID>",
+    "extra_chat_ids": []
+  },
+  {
+    "label": "Recording plan",
+    "url": "https://docs.google.com/spreadsheets/d/<RECORDING_PLAN_SPREADSHEET_ID>/edit?gid=<WORKSHEET_GID>"
+  }
+]

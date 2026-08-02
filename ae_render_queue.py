@@ -183,6 +183,53 @@ def recover_expired_jobs(queue_path):
         lock_stream.close()
 
 
+def retry_failed_jobs(queue_path, limit=None, kind=None):
+    """Put failed jobs back into the queue.
+
+    Jobs created by the sheet poller dedupe on "error", so once a render fails it is
+    never retried automatically — the plaque stays missing until somebody notices.
+    This gives the operator an explicit way to say "try again", e.g. after opening
+    the right project in After Effects.
+    """
+    queue_path, lock_stream = locked_queue(queue_path)
+    try:
+        data = load_queue_unlocked(queue_path)
+        retried = []
+        for job in data["jobs"]:
+            if job.get("status") != "error":
+                continue
+            if kind and job.get("kind") != kind:
+                continue
+            if limit is not None and len(retried) >= limit:
+                break
+            job["status"] = "queued"
+            job["error"] = ""
+            job["lease_expires_at"] = ""
+            job["retry_note"] = "Возвращено в очередь вручную."
+            job["updated_at"] = now_text()
+            retried.append(dict(job))
+        if retried:
+            save_queue_unlocked(queue_path, data)
+        return retried
+    finally:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+        lock_stream.close()
+
+
+def queue_counts(queue_path):
+    """Status histogram plus the most recent errors, for operator-facing reports."""
+    data = load_queue_unlocked(Path(queue_path).expanduser())
+    counts = {}
+    failures = []
+    for job in data.get("jobs", []):
+        status = job.get("status", "")
+        counts[status] = counts.get(status, 0) + 1
+        if status == "error":
+            failures.append(job)
+    failures.sort(key=lambda job: str(job.get("updated_at") or ""), reverse=True)
+    return counts, failures
+
+
 def update_job(queue_path, job_id, **changes):
     queue_path, lock_stream = locked_queue(queue_path)
     try:

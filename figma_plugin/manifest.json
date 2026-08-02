@@ -1,0 +1,19 @@
+{
+  "name": "TS26 карточки",
+  "id": "ts26-card-generator",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": [
+      "https://docs.google.com",
+      "https://drive.google.com",
+      "https://storage.googleapis.com",
+      "https://disk.yandex.ru",
+      "https://downloader.disk.yandex.ru"
+    ],
+    "reasoning": "Чтение AE-ready TSV и загрузка фотографий для визиток TS26."
+  }
+}

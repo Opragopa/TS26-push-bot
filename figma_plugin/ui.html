@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font: 12px Inter, sans-serif; margin: 16px; color: var(--figma-color-text); }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    label { display: block; margin: 12px 0 5px; font-weight: 600; }
+    input, textarea { box-sizing: border-box; width: 100%; border: 1px solid var(--figma-color-border); border-radius: 6px; padding: 8px; color: inherit; background: var(--figma-color-bg); }
+    textarea { min-height: 100px; resize: vertical; }
+    button { margin-top: 12px; border: 0; border-radius: 6px; padding: 9px 12px; background: #18a0fb; color: white; cursor: pointer; }
+    button.secondary { background: var(--figma-color-bg-secondary); color: inherit; }
+    #status { margin-top: 12px; white-space: pre-wrap; line-height: 1.4; }
+    .hint { color: var(--figma-color-text-secondary); line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <h2>TS26: визитки из AE-ready</h2>
+  <div class="hint">Откройте файл с шаблоном визитки. Плагин прочитает лист content_plan_cards, покажет проверку и создаст или обновит карточки.</div>
+  <label>TSV-ссылка листа content_plan_cards</label>
+  <input id="url" placeholder="https://docs.google.com/spreadsheets/d/.../export?format=tsv&gid=...">
+  <label>Имя шаблона</label>
+  <input id="template" value="TS26/VIZITKA_TEMPLATE">
+  <label>Зазор между карточками, px</label>
+  <input id="gap" type="number" value="80">
+  <label>Или вставьте TSV для теста</label>
+  <textarea id="tsv" placeholder="person_id\tФИО спикера\tДолжность\tФото на плашку..."></textarea>
+  <button id="preview">Проверить данные</button>
+  <button id="generate" class="secondary" disabled>Создать / обновить</button>
+  <div id="status"></div>
+  <script>
+    let rows = [];
+    const $ = id => document.getElementById(id);
+    const status = text => { $('status').textContent = text; };
+    const parseTsv = text => {
+      const lines = text.replace(/\r/g, '').split('\n').filter(Boolean);
+      if (!lines.length) return [];
+      const headers = lines.shift().split('\t');
+      return lines.map(line => {
+        const cells = line.split('\t');
+        return headers.reduce((row, key, index) => { row[key] = cells[index] || ''; return row; }, {});
+      });
+    };
+    const warnings = row => {
+      const result = [];
+      if (!row['ФИО спикера'] || row['ФИО спикера'].trim().split(/\s+/).length < 2) result.push('проверьте ФИО');
+      if (!row['Должность'] || !row['Должность'].trim()) result.push('нет должности');
+      if (/\d+\)|^\d+\./.test(row['ФИО спикера'] || '') || /\d+\)|^\d+\./.test(row['Должность'] || '')) result.push('осталась нумерация');
+      if ((row['Должность'] || '').length > 180) result.push('должность длиннее 180 символов');
+      return result;
+    };
+    $('preview').onclick = async () => {
+      try {
+        let text = $('tsv').value.trim();
+        if (!text) {
+          const url = $('url').value.trim();
+          if (!url) throw new Error('Укажите TSV-ссылку или вставьте данные.');
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`Источник вернул HTTP ${response.status}.`);
+          text = await response.text();
+        }
+        rows = parseTsv(text);
+        if (!rows.length) throw new Error('В TSV нет строк.');
+        const lines = rows.map((row, index) => `${index + 1}. ${row['ФИО спикера'] || 'без ФИО'} — ${row['Должность'] || 'без должности'}${warnings(row).length ? ` [${warnings(row).join(', ')}]` : ''}`);
+        status(`Найдено визиток: ${rows.length}\n\n${lines.join('\n')}\n\nПроверьте список и нажмите «Создать / обновить».`);
+        $('generate').disabled = false;
+      } catch (error) { $('generate').disabled = true; status(`Ошибка: ${error.message || error}`); }
+    };
+    $('generate').onclick = () => {
+      const images = {};
+      const loadImages = rows.reduce(async (chain, row) => {
+        await chain;
+        const url = (row['Фото на плашку'] || '').trim();
+        const personId = (row.person_id || row['ФИО спикера'] || '').trim().replace(/\s+/g, '_');
+        if (!url || !personId) return;
+        try {
+          const response = await fetch(url);
+          if (response.ok) images[personId] = Array.from(new Uint8Array(await response.arrayBuffer()));
+        } catch (_) { /* The card will be created with a visible photo warning. */ }
+      }, Promise.resolve());
+      loadImages.then(() => {
+        parent.postMessage({ pluginMessage: { type: 'generate', rows, settings: { templateName: $('template').value.trim(), gap: $('gap').value, images } } }, '*');
+        status('Генерация выполняется...');
+      });
+    };
+    onmessage = event => {
+      const message = event.data.pluginMessage;
+      if (!message) return;
+      if (message.type === 'error') status(`Ошибка Figma: ${message.message}`);
+      if (message.type === 'done') {
+        const created = message.result.filter(item => item.created).length;
+        const updated = message.result.length - created;
+        const problems = message.result.filter(item => item.warnings.length || !item.photo).map(item => `${item.name}: ${[...item.warnings, item.photo ? '' : 'фото не загружено'].filter(Boolean).join(', ')}`);
+        status(`Готово. Создано: ${created}, обновлено: ${updated}.${problems.length ? `\n\nПроверить вручную:\n${problems.join('\n')}` : ''}`);
+      }
+    };
+  </script>
+</body>
+</html>

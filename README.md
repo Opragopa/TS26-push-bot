@@ -1,155 +1,134 @@
-# Telegram-уведомления об изменении Google Sheets
+# TS26 Telegram bot и AE render pipeline
 
-Небольшой бот-поллер: периодически скачивает выбранные листы Google Sheets как TSV, считает SHA-256 и отправляет уведомление в Telegram и в системные уведомления macOS, если содержимое изменилось.
+Бот следит за Google Sheets, присылает изменения в Telegram, собирает AE-ready таблицу для моушена и умеет запускать локальный рендер After Effects на Mac через защищенный HTTP-trigger.
 
-## Быстрый старт
+Главная идея рендера: бот может жить на стороннем хостинге, а After Effects остается на рабочем Mac. Хостинг не пишет в локальные файлы Mac напрямую. Вместо этого бот отправляет HTTPS-запрос на локальный trigger-сервер, опубликованный через tunnel. Trigger кладет задание в локальную очередь, worker готовит композицию в уже открытом проекте After Effects и рендерит файл в настроенную output-папку.
 
-1. Создайте бота через `@BotFather` и получите токен.
-2. Узнайте `chat_id`: напишите боту любое сообщение, затем откройте:
+## Что умеет система
 
-   ```bash
-   curl "https://api.telegram.org/bot<ТОКЕН>/getUpdates"
-   ```
+- Уведомляет Telegram о сменах в Google Sheets.
+- Для `Контент-план` копит изменения и отправляет почасовую AI-сводку плюс полный diff.
+- Для `План записи` отправляет изменения сразу.
+- Дает пользователям форму добавления плашек прямо в Telegram.
+- Записывает плашки в Google Sheet `МОУШЕН`.
+- Автоматически ставит плашку в очередь рендера.
+- Показывает пользователю статус рендера: запускается сейчас, ждет очередь, After Effects занят, проект не открыт или рендер отключен.
+- Отправляет Telegram-уведомление, когда локальный worker завершил рендер или поймал ошибку.
+- Создает AE-ready Google Sheet с листами для плашек, тем сессий, визиток и предупреждений.
+- Поддерживает Figma-плагин для визиток из AE-ready таблицы.
+- Архивирует уже отрендеренные плашки, если они исчезли из таблицы.
 
-   Или используйте встроенную команду:
+## Архитектура
 
-   ```bash
-   python3 tg_sheet_monitor.py --print-chat-ids
-   ```
+```text
+Пользователь Telegram
+        |
+        v
+Hosted bot
+        |
+        |  HTTPS POST /render
+        |  Authorization: Bearer AE_RENDER_TRIGGER_TOKEN
+        v
+ngrok / Cloudflare Tunnel / custom tunnel
+        |
+        v
+Mac: ae_render_trigger_server.py
+        |
+        v
+data/ae_render_queue.json
+        |
+        v
+Mac: ae_render_worker.py
+        |
+        v
+Открытый проект After Effects
+        |
+        v
+Output folders
+```
 
-   Важно: `chat_id` - это ID вашего личного чата, группы или канала, а не ID самого бота. Если указать ID бота, Telegram вернет ошибку `Forbidden: the bot can't send messages to the bot`.
+Важно: локальный After Effects проект должен быть открыт заранее. Worker не создает временные `.aep`, не открывает проект сам и не прерывает чужой рендер. Если After Effects уже рендерит, задание возвращается в очередь и будет обработано позже.
+
+## Быстрый старт бота
+
+1. Создайте Telegram-бота через `@BotFather`.
+2. Получите `chat_id`: напишите боту любое сообщение и выполните:
+
+```bash
+python3 tg_sheet_monitor.py --print-chat-ids
+```
 
 3. Скопируйте настройки:
 
-   ```bash
-   cp .env.example .env
-   ```
-
-4. Заполните `.env`:
-
-   ```bash
-   TELEGRAM_BOT_TOKEN=123456:ABC...
-   TELEGRAM_CHAT_ID=123456789
-   ```
-
-   Если основных получателей несколько, можно указать их через запятую:
-
-   ```bash
-   TELEGRAM_CHAT_IDS=123456789,987654321
-   ```
-
-5. Отредактируйте `sheets.json`, если нужны другие таблицы.
-6. Запустите:
-
-   ```bash
-   python3 tg_sheet_monitor.py --notify-initial
-   ```
-
-Первый запуск по умолчанию сохраняет базовый снимок без тревоги. `--notify-initial` отправит сообщение и при первом снимке.
-
-## Получатели по таблицам
-
-По умолчанию каждая таблица отправляется в `TELEGRAM_CHAT_ID` или всем из `TELEGRAM_CHAT_IDS`.
-
-Для отдельной таблицы можно добавить дополнительных получателей:
-
-```json
-{
-  "label": "Контент-план",
-  "url": "https://docs.google.com/...",
-  "extra_chat_ids": ["415835819"]
-}
+```bash
+cp .env.example .env
+cp sheets.example.json sheets.json
 ```
 
-Если нужно полностью заменить список получателей для конкретной таблицы, используйте `chat_ids`:
-
-```json
-{
-  "label": "Только для редакторов",
-  "url": "https://docs.google.com/...",
-  "chat_ids": ["415835819"]
-}
-```
-
-В текущем `sheets.json` пользователь `415835819` добавлен только к `Контент-план`. Уведомления по `План записи` он получать не будет.
-
-## Текст изменений
-
-Бот хранит предыдущий снимок таблицы и сравнивает ячейки. Для таблиц со столбцами вроде `ФИО` и `Должность` уведомление будет выглядеть так:
+4. Заполните минимум:
 
 ```text
-Изменена должность у Иванов Иван: было «редактор», стало «продюсер».
+TELEGRAM_BOT_TOKEN=123456:ABC...
+TELEGRAM_CHAT_ID=123456789
 ```
 
-Для сеток расписания формат будет таким:
+Для нескольких получателей:
 
 ```text
-Контент-план: строка «09:15», колонка «Амфитеатр» - было «пусто», стало «Открытие смены».
+TELEGRAM_CHAT_IDS=123456789,987654321
 ```
 
-Если над строкой есть заголовок дня вроде `ДЕНЬ 4  ·  23.07  ·  [ТЕМА: Итоги / Закрытие]`, бот добавит его в уведомление, чтобы было понятно, к какой дате относится изменение.
+5. Заполните реальные Google Sheets URL в локальном `sheets.json`. Этот файл добавлен в `.gitignore` и не должен уходить в публичный Git.
+6. Локально запустите один цикл:
 
-В Telegram бот отправляет эти изменения с форматированием: заголовок жирным, название таблицы курсивом, каждое изменение отдельным пунктом, а изменившаяся часть в значениях `Было` и `Стало` подчёркнута.
-
-Например:
-
-```html
-Было: Иван Иванов, <u>руководитель управления</u>
-Стало: Иван Иванов <u>директор подразделения</u>
+```bash
+python3 tg_sheet_monitor.py --notify-initial
 ```
 
-Если старое состояние было создано предыдущей версией бота, первое изменение после обновления может прийти в коротком виде. Следующие изменения уже будут подробными.
+На хостинге бот должен запускаться через `python main.py`. В репозитории есть `Dockerfile`; AE JSX-файлы в корне оставлены как совместимые лаунчеры, чтобы старые настройки хостинга не запускали JSX вместо Python.
 
-## Почасовые AI-сводки Контент-плана
+## Переменные окружения бота
 
-Изменения листа `Контент-план` бот продолжает замечать с заданным интервалом, но складывает их в `sheet_state.json` и отправляет единым пакетом в `00` минут каждого часа по часовому поясу Нидерландов (`Europe/Amsterdam`). Если за час изменений не было, сообщение не отправляется. Получатели остаются теми же, что настроены для `Контент-план`, включая пользователей, добавленных через команды бота.
-
-Пакет отправляется отдельными сообщениями: сначала короткая сводка из 3-5 строк в Telegram quote-блоке, затем полный diff. Если AI-сводка или ее отправка ломается, полный diff все равно отправляется отдельным сообщением. `План записи` не меняется: он по-прежнему отправляет diff сразу после обнаружения изменения.
-
-Для AI-сводки через Groq задайте на Bothost защищённую переменную:
+Минимум для Telegram:
 
 ```text
-GROQ_API_KEY=ваш_ключ_Groq_API
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+TELEGRAM_CHAT_IDS=
+TELEGRAM_ADMIN_CHAT_IDS=
 ```
 
-По умолчанию бот сам выберет Groq, если есть `GROQ_API_KEY`, и будет использовать модель:
+Для render-trigger с хостинга:
 
 ```text
-GROQ_SUMMARY_MODEL=llama-3.3-70b-versatile
+AE_RENDER_ENABLED=true
+AE_RENDER_TRIGGER_URL=https://your-ngrok-or-domain/render
+AE_RENDER_TRIGGER_TOKEN=тот_же_токен_что_на_Mac
 ```
 
-Можно явно зафиксировать провайдера:
+Если `AE_RENDER_TRIGGER_URL` не задан, бот попытается писать в локальный `data/ae_render_queue.json`. Это подходит только когда бот и After Effects работают на одной машине. Для внешнего хостинга почти всегда нужен trigger URL.
+
+Для уведомлений о результате рендера от локального worker:
 
 ```text
-AI_SUMMARY_PROVIDER=groq
+AE_RENDER_NOTIFY_TELEGRAM=true
 ```
 
-Часовой пояс почасовой отправки можно переопределить переменной:
+Для ссылок на готовые плашки в Яндекс.Диске:
 
 ```text
-CONTENT_PLAN_TIME_ZONE=Europe/Amsterdam
+YANDEX_DISK_PLATES_ENABLED=true
+YANDEX_DISK_TOKEN=ваш_oauth_токен_яндекс_диска
+YANDEX_DISK_OUTPUT_ROOT=disk:/path/to/rendered/plates
 ```
 
-Альтернативно можно использовать OpenAI:
-
-```text
-OPENAI_API_KEY=ваш_ключ_OpenAI_API
-OPENAI_SUMMARY_MODEL=gpt-5-mini
-```
-
-Дополнительно можно ограничить размер diff, передаваемого в AI API:
-
-```text
-OPENAI_SUMMARY_MAX_INPUT_CHARS=60000
-```
-
-Для Groq используется OpenAI-compatible endpoint `https://api.groq.com/openai/v1/chat/completions`; для OpenAI используется `gpt-5-mini` через [Responses API](https://developers.openai.com/api/docs/models). Если ключ отсутствует или AI API временно недоступен, бот не теряет уведомление: отправляет полный diff без AI-сводки и пишет причину в лог. Длинный diff автоматически делится на несколько Telegram-сообщений.
+Токены не коммитятся в Git. Если токен попал на скриншот или в чат, его лучше перевыпустить.
 
 ## AE-ready Контент-план
 
-Бот может создавать отдельную личную Google Sheet для After Effects, не изменяя оригинальный `Контент-план`. Эта таблица обновляется раз в час, если изменился hash источника, или вручную командой `/ae_sync`.
+AE-ready таблица создается отдельно и не меняет оригинальный `Контент-план`. Бот обновляет ее раз в час при изменении источника или вручную командой `/ae_sync`.
 
-В AE-ready таблицу пишутся листы:
+Основные листы:
 
 ```text
 content_plan_sessions
@@ -164,452 +143,406 @@ warnings
 source_cells
 ```
 
-Основные листы сохраняют формат, который уже читают скрипты из `sheet2comp-ae`: `content_plan_sessions` для тем сессий, `content_plan_plates` для плашек, `content_plan_cards` для визиток.
-
-Переменные Bothost:
+Переменные:
 
 ```text
 AE_READY_SYNC_ENABLED=true
-AE_READY_SOURCE_URL=https://docs.google.com/spreadsheets/d/10C3eoaG146WgOeQeoli90dQCHPruoJ_d4_rqcyoUR8M/edit?gid=213088400#gid=213088400
-AE_POSITION_REFERENCE_URL=https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=0#gid=0
+AE_READY_SOURCE_URL=https://docs.google.com/spreadsheets/d/.../edit
+AE_POSITION_REFERENCE_URL=https://docs.google.com/spreadsheets/d/.../edit
+AE_READY_SPREADSHEET_ID=
 AE_READY_SPREADSHEET_TITLE=TS26 AE-ready Content Plan
-AI_CORRECTION_PROVIDER=deepseek
-AI_CORRECTION_FALLBACK_PROVIDER=groq
-DEEPSEEK_API_KEY=ваш_ключ_DeepSeek
-DEEPSEEK_MODEL=deepseek-v4-pro
-AI_CORRECTION_MAX_OUTPUT_TOKENS=800
+AE_READY_SHARE_EMAILS=email@example.com
 AE_READY_PLAQUE_SYNC_ENABLED=true
 AE_READY_PLAQUE_CONFIDENCE_THRESHOLD=0.9
 AE_READY_PLAQUE_NOTE_TEXT=<-- добавлено из AE-ready
 ```
 
-`AE_READY_SPREADSHEET_ID` можно не задавать: при первом `/ae_sync` бот создаст новую таблицу и сохранит id в `sheet_state.json`. Если таблицу нужно расшарить на ваш Google-аккаунт, задайте `AE_READY_SHARE_EMAILS=email@example.com`.
+`AE_READY_SPREADSHEET_ID` можно не задавать: при первом `/ae_sync` бот создаст таблицу и сохранит ID в `sheet_state.json`. Ссылку можно получить командой `/ae_link`.
 
-При каждом успешном AE-ready sync бот также может переносить в лист `МОУШЕН` только плашки с `МОУШЕН_ГОТОВО=1`, заполненными ФИО/должностью и достоверностью не ниже `AE_READY_PLAQUE_CONFIDENCE_THRESHOLD`. Оригинальный `Контент-план` при этом не изменяется.
-
-Для DeepSeek JSON-коррекции thinking-режим отключается, чтобы финальный JSON не терялся в отдельном reasoning-блоке. `AI_CORRECTION_MAX_OUTPUT_TOKENS` ограничивает размер ответа и по умолчанию равен `800`. Если провайдер отвечает `429`, он временно пропускается до следующего sync, поэтому бот не повторяет исчерпавший лимит запрос на каждой ячейке.
-
-## Рендер плашек через aerender
-
-После подтверждения новой плашки бот записывает строку в Google Sheets и ставит задание в `data/ae_render_queue.json`. Отдельный процесс `ae_render_worker.py` запускает `person_plates_from_sheet.jsx` в ручном режиме: генератор дублирует `MASTER-COMP`, заполняет имя и должность, называет новую композицию `Фамилия Имя` без префикса и сам добавляет её в Render Queue. Затем After Effects рендерит именно созданную композицию в уже открытом проекте. В конфиге включён `require_open_project`: worker не создаёт временные `.aep` и не открывает проект сам, а сообщает об ошибке, если открыт другой проект.
-
-Если меняется плашка в `План записи` на сегодняшнюю дату, бот отправляет отдельное уведомление получателям этого листа. При заданных `YANDEX_DISK_TOKEN` и `YANDEX_DISK_OUTPUT_ROOT` он ищет готовый `.mov` в папке Яндекс.Диска, при необходимости публикует файл и добавляет публичную ссылку. Пример настроек на Bothost:
+AI-коррекция ФИО и должностей:
 
 ```text
-YANDEX_DISK_PLATES_ENABLED=true
-YANDEX_DISK_TOKEN=ваш_oauth_токен_яндекс_диска
-YANDEX_DISK_OUTPUT_ROOT=disk:/Заставки ТС 2026/Трансляция/Динамика/04_ПЛАШКИ/Запись
+AI_CORRECTION_PROVIDER=deepseek
+AI_CORRECTION_FALLBACK_PROVIDER=groq
+AI_CORRECTION_ENABLED=true
+AI_CORRECTION_MAX_CALLS_PER_SYNC=16
+AI_CORRECTION_CONFIDENCE_THRESHOLD=0.82
+AI_CORRECTION_MAX_OUTPUT_TOKENS=800
+DEEPSEEK_API_KEY=
+DEEPSEEK_MODEL=deepseek-v4-pro
+GROQ_API_KEY=
+GROQ_CORRECTION_MODEL=llama-3.3-70b-versatile
 ```
 
-Токен хранится только в защищенной переменной окружения и не добавляется в Git. Если рендер еще не успел появиться в облачной папке, бот сообщает об этом без ссылки; следующая смена в расписании проверяется отдельно.
+## Почасовые AI-сводки
 
-В `ae_render_config.json` у каждого типа задания свой обязательный Output Module: `DVX 3 no audio` для `session_topic` и `High Quality with Alpha` для `plaque`. Для «Огня смыслов» пресет будет добавлен вместе с его AE-шаблоном. Если у After Effects нет указанного пресета, воркер остановит задание с понятной ошибкой.
+`Контент-план` отправляется пакетами в начале часа. Если изменений не было, сообщение не отправляется. Если AI недоступен, бот все равно отправит полный diff.
 
-Маршруты уже настроены так:
+```text
+AI_SUMMARY_PROVIDER=groq
+GROQ_API_KEY=
+GROQ_SUMMARY_MODEL=llama-3.3-70b-versatile
+OPENAI_API_KEY=
+OPENAI_SUMMARY_MODEL=gpt-5-mini
+OPENAI_SUMMARY_MAX_INPUT_CHARS=60000
+CONTENT_PLAN_TIME_ZONE=Europe/Amsterdam
+CONTENT_PLAN_DELIVERY_RETRY_SECONDS=300
+```
 
-- `plaque` - `.../04_ПЛАШКИ/Запись`;
-- `session_topic` - `.../ТЕМЫ СЕССИЙ/<СМЕНА>/День <N>`;
-- `fire_of_meanings` - `.../06_ОГОНЬ СМЫСЛОВ`.
+## Рендер плашек
 
-Запуск воркера с прямым чтением Google Sheets:
+Плашки создаются из AE-шаблона:
+
+```text
+Композиция: MASTER-COMP
+Слой имени: ФИО спикера
+Слой должности: Должность
+Output Module: High Quality with Alpha
+```
+
+Worker запускает `person_plates_from_sheet.jsx` в ручном режиме. Скрипт дублирует `MASTER-COMP`, заполняет текст, называет новую композицию в формате `Фамилия Имя` без префиксов и добавляет созданную композицию в Render Queue. После этого worker рендерит именно созданную композицию, а не шаблон.
+
+Вывод:
+
+```text
+<LOCAL_SYNC_ROOT>/plates
+```
+
+Файл получается как:
+
+```text
+Фамилия Имя.mov
+```
+
+## Рендер тем сессий
+
+Темы сессий читаются из AE-ready листа `content_plan_sessions`. Автоматический рендер тем по умолчанию выключен, чтобы сначала проверить данные вручную.
+
+Шаблон композиции:
+
+```text
+{shift}_.*Заставка с темами_.*альт
+```
+
+Примеры shift: `ПРАВДА`, `РОДИНА`.
+
+Слои:
+
+```text
+ТЕМА
+ОПИСАНИЕ
+```
+
+Output Module:
+
+```text
+DVX 3 no audio
+```
+
+Вывод:
+
+```text
+<LOCAL_SYNC_ROOT>/session_topics/<SHIFT>/Day <N>
+```
+
+Включение:
+
+```text
+AE_RENDER_SESSION_TOPICS_ENABLED=true
+AE_ACTIVE_SHIFT=ПРАВДА
+```
+
+Также в `ae_render_config.json` должен быть указан `ae_ready_spreadsheet_id` или переменная `AE_READY_SPREADSHEET_ID`.
+
+## Огонь смыслов
+
+Маршрут уже зарезервирован:
+
+```text
+<LOCAL_SYNC_ROOT>/fire_of_meanings
+```
+
+В `ae_render_config.json` тип `fire_of_meanings` пока не имеет заполненного Output Module и AE-шаблона. Worker остановит такое задание с понятной ошибкой, пока шаблон не будет подключен.
+
+## Настройка Mac для рендера
+
+1. Откройте проект в After Effects:
+
+```text
+<ABSOLUTE_PATH_TO_AFTER_EFFECTS_PROJECT>.aep
+```
+
+2. Проверьте `ae_render_config.json`:
 
 ```bash
-python3 ae_render_worker.py --poll-sheets
+cp ae_render_config.example.json ae_render_config.json
 ```
 
-Для безопасной проверки одной задачи:
+В локальном `ae_render_config.json` заполните:
+
+```text
+project_path
+afterfx_bin
+aerender_bin
+person_plates_script_path
+session_topics_script_path
+routes
+output_module_templates
+```
+
+`ae_render_config.json` содержит локальные пути, ID таблиц и output-директории, поэтому он добавлен в `.gitignore`. В Git хранится только `ae_render_config.example.json`.
+
+3. Установите trigger-сервер:
+
+```bash
+AE_RENDER_TRIGGER_TOKEN="ваш_секретный_токен" ./install_ae_render_trigger_server_macos.command
+```
+
+Если токен не передать, установщик сгенерирует его и сохранит здесь:
+
+```text
+~/Documents/tg_sheet_monitor/ae_render_trigger.token
+```
+
+4. Запустите tunnel. Для ngrok пример:
+
+```bash
+ngrok http 8765
+```
+
+В переменных окружения хостинга нужно прописать URL из строки `Forwarding`, например:
+
+```text
+AE_RENDER_TRIGGER_URL=https://example.ngrok-free.dev/render
+AE_RENDER_TRIGGER_TOKEN=тот_же_токен_из_ae_render_trigger.token
+```
+
+5. Установите worker:
+
+```bash
+./install_ae_render_worker_macos.command
+```
+
+Логи:
+
+```text
+~/Documents/tg_sheet_monitor/ae_render_trigger.log
+~/Documents/tg_sheet_monitor/ae_render_trigger.err.log
+~/Documents/tg_sheet_monitor/ae_render_worker.log
+~/Documents/tg_sheet_monitor/ae_render_worker.err.log
+```
+
+Остановить:
+
+```bash
+./stop_ae_render_trigger_server_macos.command
+./stop_ae_render_worker_macos.command
+```
+
+## Два режима обработки очереди
+
+Рекомендуемый режим для хостинга: бот вызывает trigger, trigger кладет задание в очередь, worker забирает очередь на Mac.
+
+Локальный worker, установленный через `install_ae_render_worker_macos.command`, запускается с `--poll-sheets`. Это значит, что он дополнительно читает Google Sheets и может сам добавлять задания из таблицы. Если OAuth Google истек, в `ae_render_worker.err.log` появится `invalid_grant`; trigger-рендер при этом может продолжать работать, но логи будут шумными.
+
+Ручная обработка одного задания без постоянного цикла:
+
+```bash
+python3 ae_render_worker.py --once
+```
+
+Ручное чтение Google Sheets и обработка одного задания:
 
 ```bash
 python3 ae_render_worker.py --once --poll-sheets
 ```
 
-Только проверить OAuth и чтение таблиц, не запуская After Effects:
+Только проверить Google Sheets без запуска After Effects:
 
 ```bash
 python3 ae_render_worker.py --poll-sheets --poll-only
 ```
 
-Для постоянной работы на Mac после заполнения конфига дважды кликните `install_ae_render_worker_macos.command`. Остановить воркер можно через `stop_ae_render_worker_macos.command`.
-
-Старые временные проекты можно безопасно убрать командой `cleanup_ae_temp_projects_macos.command`: она перемещает `/private/tmp/ts26-ae-render` в Корзину, если внутри найдены `.aep`.
-
-Чтобы локальный воркер сам читал таблицы, запустите его с флагом `--poll-sheets`. Укажите в `ae_render_config.json` путь к локальному OAuth user JSON и карту `shift_by_day`.
-
-По умолчанию worker проверяет Google Sheets раз в 60 секунд. Интервал можно изменить переменной `AE_RENDER_WORKER_INTERVAL` перед запуском `install_ae_render_worker_macos.command`. На Bothost не задавайте `AE_RENDER_TRIGGER_URL`: хостинг не видит локальный Mac по Tailscale, поэтому после записи плашки локальный worker сам заберет ее из листа `МОУШЕН`.
-
-HTTP trigger через Tailscale - запасной ручной способ. По умолчанию он только добавляет задачу в локальную очередь, а рендер выполняет основной worker. Если нужно, чтобы trigger сам пытался обработать очередь, запустите его с переменной:
-
-```text
-AE_RENDER_TRIGGER_DRAIN_QUEUE=true
-```
-
-В обычном режиме оставляйте ее выключенной, чтобы trigger и worker не пытались одновременно рендерить одну очередь.
-
-Автоматический рендер тем сессий отключен по умолчанию: `session_topics_auto_render=false` или `AE_RENDER_SESSION_TOPICS_ENABLED=false`. Воркер продолжает автоматически обрабатывать плашки из `МОУШЕН`, а темы сессий перед рендером нужно проверить и запустить вручную.
-
-Для авторендера тем локальному Mac нужен ID именно AE-ready таблицы, которую создает хостинговый бот. Получите ссылку в Telegram командой `/ae_link`, затем внесите ID из URL в `ae_render_config.json` как `ae_ready_spreadsheet_id` или в локальный `.env` как `AE_READY_SPREADSHEET_ID`. Без этого плашки из локальной таблицы могут рендериться, а темы сессий в очередь не попадут. Пустое описание темы теперь допустимо: в AE будет создана тема без текста описания.
-
-Смена текущего источника задается в `active_shift` (сейчас `ПРАВДА`) или переменной `AE_ACTIVE_SHIFT`. Если `active_shift` указан, все дни из текущего AE-ready источника относятся только к этой смене: темы и оставшиеся задания другой смены, например `РОДИНА`, не ставятся в рендер и не передаются в After Effects. Карта `templates.session_topic.shift_by_day` используется как резервная настройка, если активная смена не задана.
-
-Для авто-создания таблицы Google-авторизация использует scope `drive.file`. Если OAuth-токен был создан раньше только для `spreadsheets`, пересоздайте `GOOGLE_OAUTH_USER_JSON`.
-
-Команды админа:
-
-```text
-/ae_sync
-/ae_status
-/ae_source
-/ae_link
-/ae_warnings
-/ae_rebuild
-```
-
-`/ae_source` без аргументов показывает текущую ссылку источника.
-`/ae_source https://docs.google.com/spreadsheets/d/...` меняет ссылку на исходный `Контент-план` для следующих sync.
-
-## Системные уведомления macOS
-
-На Mac уведомления включены по умолчанию. Они используют те же человеческие тексты, что и Telegram: кто/что изменилось, старая и новая версия, название таблицы в подзаголовке.
-
-Отключить только системные уведомления, оставив Telegram:
+Проверить, что trigger жив:
 
 ```bash
-python3 tg_sheet_monitor.py --no-macos-notifications
+curl http://127.0.0.1:8765/health
 ```
 
-Отключить все уведомления и оставить только лог:
+Тестовая постановка в очередь:
 
 ```bash
-python3 tg_sheet_monitor.py --no-notifications
+curl -X POST http://127.0.0.1:8765/render   -H 'Content-Type: application/json'   -H 'Authorization: Bearer TOKEN'   -d '{"kind":"plaque","name":"Тестовый Иван","position":"ТЕСТ","source_key":"manual-test"}'
 ```
 
-## Проверить один раз
+## Команды Telegram
 
-```bash
-python3 tg_sheet_monitor.py --once --notify-initial
-```
-
-Если нужно только проверить чтение таблиц без отправки сообщений:
-
-```bash
-python3 tg_sheet_monitor.py --once --no-telegram
-```
-
-## Запуск на Bothost
-
-В Bothost можно запускать прямо из GitHub-репозитория.
-В репозитории есть `Dockerfile`, поэтому Bothost должен собирать контейнер по нему и запускать именно `python main.py`. AE-скрипты хранятся как шаблоны в `ae_templates/*.jsx.template`. Файлы `ae_prepare_project.jsx` и `ae_render_open_queue.jsx` в корне оставлены только как совместимые Node-лаунчеры: если хостинг по старой настройке запустит один из них, он передаст запуск в `python main.py`.
-
-1. Создайте или откройте бота в панели Bothost.
-2. Укажите репозиторий:
-
-   ```text
-   https://github.com/Opragopa/TS26-push-bot.git
-   ```
-
-3. Ветка:
-
-   ```text
-   main
-   ```
-
-4. Главный файл:
-
-   ```text
-   main.py
-   ```
-
-5. Режим сборки: `Dockerfile` из репозитория. Не используйте системную команду `/usr/bin/python3`: контейнер сам устанавливает зависимости из `requirements.txt`.
-6. В переменных окружения добавьте:
-
-   ```text
-   TELEGRAM_BOT_TOKEN=ваш_токен_от_BotFather
-   TELEGRAM_CHAT_ID=ваш_основной_chat_id
-   TELEGRAM_ADMIN_CHAT_IDS=ваш_основной_chat_id
-   GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
-   # или GOOGLE_OAUTH_USER_JSON={"type":"authorized_user",...}
-   PLAQUE_FORM_ENABLED=true
-   GROQ_API_KEY=ваш_ключ_Groq_API
-   AI_SUMMARY_PROVIDER=groq
-   GROQ_SUMMARY_MODEL=llama-3.3-70b-versatile
-   SHEET_MONITOR_INTERVAL=120
-   SHEET_MONITOR_DURATION_SECONDS=0
-   SHEET_MONITOR_DATA_DIR=data
-   SHEET_MONITOR_STARTUP_MESSAGE=true
-   ```
-
-   `SHEET_MONITOR_INTERVAL`, `SHEET_MONITOR_DURATION_SECONDS`, `SHEET_MONITOR_DATA_DIR` и `SHEET_MONITOR_STARTUP_MESSAGE` можно не указывать. `SHEET_MONITOR_STARTUP_MESSAGE=true` удобно включать только для теста: бот пришлет сообщение сразу после старта.
-
-7. Нажмите деплой/запуск и откройте логи.
-
-В логах должен появиться старт с версией и runtime, например:
-
-```text
-Старт монитора vcontainer: 2 таблиц, интервал 120 сек.
-Runtime: Python 3.11.x, pid ...
-```
-
-Первый запуск сохранит базовый снимок. Реальные уведомления об изменениях начнут приходить со следующего изменения таблицы.
-
-## Админ-панель
-
-Бот умеет отвечать админу в Telegram. Напишите боту:
+Пользовательские:
 
 ```text
 /start
+/add
+/plaque
+/cancel
 ```
 
-или
+Админские:
 
 ```text
-/debug
+/status
+/ae_status
+/ae_sync
+/ae_rebuild
+/ae_link
+/ae_warnings
+/ae_source <url>
+/plaque_users
+/add_plaque_user <chat_id>
+/remove_plaque_user <chat_id>
+/render_retry
+/figma
 ```
 
-Он покажет админ-панель с разделами:
+`/render_retry` возвращает ошибочные render jobs в очередь. Используйте его после того, как открыли правильный проект After Effects или исправили Output Module/папку вывода.
 
-- `Добавить плашку` - пройти форму самому.
-- `Мониторинг` - статус таблиц, получатели, тестовые уведомления и Google-доступ.
-- `Доступы` - управление получателями `Контент-план` и пользователями формы плашек.
-- `AE-ready` - ручной sync, статус, ссылка и warnings AE-ready таблицы.
-- `Пользовательский вид` - превью формы и режим обычного пользователя.
+## Диагностика рендера
 
-При старте бот обновляет меню slash-команд в Telegram: для обычных пользователей видна только `/start`, а полный список команд назначается только admin chat_id через персональный scope Telegram.
-
-По умолчанию админы берутся из `TELEGRAM_CHAT_ID` / `TELEGRAM_CHAT_IDS`. Если нужно задать отдельно:
-
-```text
-TELEGRAM_ADMIN_CHAT_IDS=397481603
-```
-
-Чтобы проверить второго человека, нажмите `Тест Контент-план`. Если он не получил сообщение, в ответ админу придет ошибка Telegram. Самая частая причина: человек еще ни разу не написал боту личное сообщение.
-
-Команда для превью обычного пользователя:
-
-```text
-/preview_user
-```
-
-Команда для полного пользовательского режима админа:
-
-```text
-/user_mode
-```
-
-Вернуться в админ-панель можно кнопкой `Вернуться в админку` или командой:
-
-```text
-/debug
-```
-
-Проверить Google-доступ командой:
-
-```text
-/google_access
-```
-
-## Доступ к Контент-плану из бота
-
-Админ может добавлять получателей `Контент-план` без правки `sheets.json` и без redeploy. Эти люди будут получать только уведомления `Контент-план`; `План записи` им не отправляется.
-
-Человек должен сначала написать боту любое сообщение, например `/start`, иначе Telegram может запретить отправку. После этого его chat_id появится в разделе `Доступы` / `/content_users` в блоке последних пользователей.
-
-Команды админа:
-
-```text
-/content_users
-/add_content_user 415835819
-/remove_content_user 415835819
-```
-
-После добавления бот отправит этому chat_id тестовое сообщение. Для общей проверки можно открыть `Мониторинг` и нажать `Тест Контент-план`.
-
-## Форма добавления плашек
-
-Для пользователей, которые не входят в уже заданные `chat_id` админов и получателей уведомлений, `/start` открывает стартовый экран с описанием функций и кнопкой добавления плашки.
-В меню команд у обычных пользователей остается только `/start`; остальные действия выполняются визуальными кнопками.
-
-Сценарий:
-
-1. Пользователь нажимает `/start`.
-2. Бот показывает, что доступно пользователю, и предлагает `Добавить плашку`.
-3. Пользователь нажимает кнопку `Добавить плашку` рядом с полем ввода или отправляет `/add`.
-4. Пользователь вводит `Фамилия Имя`, затем `Должность`, либо сразу отправляет пакет строк.
-5. Бот показывает подтверждение `Проверьте перед отправкой`.
-6. Только после кнопки `Отправить` бот пишет данные в Google Sheet.
-
-Пакетный формат:
-
-```text
-Иванов Иван_Должность 1
-Дмитриев Дмитрий_Должность 2
-```
-
-Каждая строка добавляется или обновляется отдельно. Обычный пользователь видит только результат без ссылки на таблицу; ссылки на строки отправляются только админам.
-
-Запись идет в таблицу:
-
-```text
-https://docs.google.com/spreadsheets/d/1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js/edit?gid=1399617264
-```
-
-Лист выбирается по `gid=1399617264` (`Моушен`). Бот ищет имя начиная со строки `280`:
-
-- если такое `Фамилия Имя` уже есть в колонке `A`, обновляет эту строку;
-- если имени нет, пишет в первую свободную строку начиная с `280`;
-- в `A` пишет имя, в `B` должность, в `E` пометку `<-- добавлено через ТГ бота`.
-
-Для записи в Google Sheets есть два варианта авторизации.
-
-### Вариант 1: сервисный аккаунт
-
-Это самый безопасный вариант для хостинга: бот пишет как отдельный технический аккаунт.
-
-1. Создайте service account в Google Cloud.
-2. Скачайте JSON-ключ.
-3. Расшарьте Google Sheet на email сервисного аккаунта с правом `Редактор`.
-4. На Bothost добавьте весь JSON ключ одной переменной:
-
-   ```text
-   GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"..."}
-   ```
-
-### Вариант 2: ваш Google-аккаунт
-
-Если нужно, чтобы бот писал от вашего аккаунта и пользователи не заходили в Google Sheets, используйте OAuth refresh token.
-
-1. В Google Cloud создайте OAuth Client ID типа `Desktop app`.
-2. Скачайте JSON и сохраните локально рядом с проектом. Можно не переименовывать: скрипт сам найдёт `client_secret*.json`. Если хотите, можно назвать файл `oauth_client.json`.
-3. Локально установите зависимости:
-
-   ```bash
-   python3 -m pip install -r requirements.txt
-   ```
-
-4. Запустите:
-
-   ```bash
-   python3 make_google_oauth_token.py
-   ```
-
-   Или явно передайте имя файла:
-
-   ```bash
-   python3 make_google_oauth_token.py client_secret_....json
-   ```
-
-5. Откроется браузер Google. Войдите своим аккаунтом и разрешите доступ к Google Sheets.
-6. Скрипт напечатает JSON. Скопируйте его в Bothost как переменную:
-
-   ```text
-   GOOGLE_OAUTH_USER_JSON={"type":"authorized_user","client_id":"...","client_secret":"...","refresh_token":"..."}
-   ```
-
-Этот токен позволяет боту редактировать таблицы от вашего имени в рамках доступа `spreadsheets`. Храните его как секрет и не коммитьте в Git.
-
-Настройки формы можно менять переменными:
-
-```text
-PLAQUE_FORM_ENABLED=true
-PLAQUE_SPREADSHEET_ID=1J6nJHM4wXF66LJO7dDNT6QgrxlQ5VPb-3B-4o7Ff0js
-PLAQUE_WORKSHEET_GID=1399617264
-PLAQUE_START_ROW=280
-PLAQUE_NAME_COL=1
-PLAQUE_POSITION_COL=2
-PLAQUE_NOTE_COL=5
-PLAQUE_NOTE_TEXT=<-- добавлено через ТГ бота
-```
-
-### Как протестировать форму плашек
-
-1. На Bothost проверьте, что заданы `TELEGRAM_CHAT_ID`, `TELEGRAM_ADMIN_CHAT_IDS`, `GOOGLE_OAUTH_USER_JSON` или `GOOGLE_SERVICE_ACCOUNT_JSON`.
-2. Сделайте redeploy. В логах должна быть версия `2026-07-22.17` или новее.
-3. Админом отправьте боту `/start` или `/debug`.
-4. Откройте `Мониторинг` и нажмите `Google-доступ`. Если бот отвечает ошибкой про `GOOGLE_*`, добавьте на Bothost `GOOGLE_OAUTH_USER_JSON` или `GOOGLE_SERVICE_ACCOUNT_JSON` и перезапустите.
-5. Откройте `Пользовательский вид` и нажмите `Превью формы`, если нужно только посмотреть сценарий без записи в Google Sheet.
-6. Нажмите `Режим пользователя`, если хотите пройти форму от своего админского аккаунта с настоящей записью в Google Sheet.
-7. Заполните имя и должность, на финальном экране нажмите `Отправить`.
-8. Проверьте лист `Моушен`: строка должна появиться или обновиться начиная с `280`, а в колонке `E` должна быть пометка `<-- добавлено через ТГ бота`.
-
-После нажатия `Отправить` бот перечитывает записанную строку. Обычный пользователь увидит только, что плашка добавлена или обновлена. Админам отдельно придет служебное сообщение с листом, номером строки и прямой ссылкой на диапазон `A:E`. Если строка не совпала, бот пришлет ошибку с ожидаемыми и прочитанными значениями.
-
-Для теста со стороны настоящего обычного пользователя можно также использовать Telegram-аккаунт, которого нет в `TELEGRAM_CHAT_ID`, `TELEGRAM_CHAT_IDS`, `TELEGRAM_ADMIN_CHAT_IDS` и дополнительных получателях `sheets.json`. С этого аккаунта достаточно отправить `/start`.
-
-Для теста доставки без изменения таблиц добавьте в Bothost переменную:
-
-```text
-SHEET_MONITOR_STARTUP_MESSAGE=true
-```
-
-Затем перезапустите бота. В Telegram должно прийти сообщение `Монитор Google Sheets активен`. После проверки переменную лучше удалить или поставить `false`, иначе сообщение будет приходить при каждом рестарте.
-
-Если хотите получить уведомления и при первом сохранении снимка:
-
-```text
-SHEET_MONITOR_NOTIFY_INITIAL=true
-```
-
-## Тестовый частый мониторинг
-
-Для обычной работы оставьте интервал 120 секунд или больше. Для короткого теста можно временно поставить:
-
-```text
-SHEET_MONITOR_INTERVAL=10
-SHEET_MONITOR_DURATION_SECONDS=300
-SHEET_MONITOR_STARTUP_MESSAGE=true
-```
-
-Так бот будет проверять таблицы каждые 10 секунд и сам завершится через 5 минут. После теста верните:
-
-```text
-SHEET_MONITOR_INTERVAL=120
-SHEET_MONITOR_DURATION_SECONDS=0
-SHEET_MONITOR_STARTUP_MESSAGE=false
-```
-
-Локально такой же тест:
+Главная команда диагностики на Mac:
 
 ```bash
-python3 main.py --interval 10 --duration 300 --startup-message
+python3 ae_render_doctor.py
 ```
 
-## Параметры
+Что смотреть при проблемах:
 
 ```bash
-python3 tg_sheet_monitor.py --help
+tail -f ~/Documents/tg_sheet_monitor/ae_render_trigger.log
+tail -f ~/Documents/tg_sheet_monitor/ae_render_worker.log
+tail -f ~/Documents/tg_sheet_monitor/ae_render_worker.err.log
 ```
 
-Основные флаги:
+Частые статусы trigger:
 
-- `--interval 120` - интервал проверки в секундах.
-- `--duration 300` - работать заданное число секунд и выйти; `0` значит без ограничения.
-- `--sheet "Название=https://docs.google.com/..."` - задать таблицы через CLI вместо `sheets.json`.
-- `--state state/sheet_state.json` - путь к файлу состояния.
-- `--quiet` - не печатать проверки без изменений.
-- `--print-chat-ids` - вывести `chat_id` из последних сообщений боту.
-- `--no-telegram` - только логировать, не отправлять сообщения.
-- `--no-admin-buttons` - отключить чтение Telegram-команд и debug-кнопки.
-- `--no-plaque-form` - отключить форму добавления плашек для обычных пользователей.
+```text
+200 queued      бот дошел до Mac, задание добавлено
+200 existing    такое задание уже есть в очереди или выполнено
+400             не хватает name/position или некорректный JSON
+401             не передан или не совпал токен
+409             открыт не тот проект After Effects
+500             внутренняя ошибка trigger-сервера
+```
 
-## Автозапуск на macOS
+Если пользователь видит “Рендер запускается сейчас”, файл обычно появится быстро. Если видит “перед ним N заданий” или “After Effects занят”, плашка не потерялась: она ждет очередь.
+
+## Очередь и файлы состояния
+
+```text
+data/ae_render_queue.json       очередь заданий
+data/ae_render_registry.json    индекс отрендеренных плашек для архивации
+data/sheet_state.json           состояние мониторинга и AE-ready sync
+```
+
+Локальные конфиги, которые не коммитятся:
+
+```text
+.env
+sheets.json
+ae_render_config.json
+google_oauth_user.json
+client_secret*.json
+```
+
+Статусы jobs:
+
+```text
+queued
+preparing
+rendering
+done
+error
+cancelled
+```
+
+Worker восстанавливает зависшие jobs после перезапуска, если lease истек.
+
+## Архивация удаленных плашек
+
+Если плашка исчезла из активных строк Google Sheets, worker не удаляет файл безвозвратно. При настройке:
+
+```json
+"delete_missing_plaques": "archive"
+```
+
+файл переносится в архивную папку, например:
+
+```text
+_Удаленные AE
+```
+
+Проверка без переноса файлов:
 
 ```bash
-./install_launch_agent_macos.command
+python3 ae_render_worker.py --poll-sheets --poll-only --sync-dry-run
 ```
 
-Логи будут лежать в `~/Documents/tg_sheet_monitor/tg_sheet_monitor.log` и `~/Documents/tg_sheet_monitor/tg_sheet_monitor.err.log`.
+## Временные файлы
 
-Остановить автозапуск:
+Worker использует `/private/tmp/ts26-ae-render` только для per-job JSX, params и staged `.mov`. После задания папка job очищается автоматически. Старые временные проекты от прошлой версии можно убрать командой:
 
 ```bash
-launchctl unload "$HOME/Library/LaunchAgents/com.tg-pushes-ts26.sheet-monitor.plist"
+./cleanup_ae_temp_projects_macos.command
 ```
 
-Или просто запустите файл:
+Команда переносит `/private/tmp/ts26-ae-render` в Корзину, если внутри найдены `.aep`.
+
+## Google OAuth
+
+Для локального polling Google Sheets нужен OAuth user JSON:
+
+```text
+<PROJECT_DIR>/google_oauth_user.json
+```
+
+Если в логах worker появляется:
+
+```text
+invalid_grant: Token has been expired or revoked
+```
+
+нужно заново пройти OAuth и заменить user JSON. Это влияет на режим `--poll-sheets`, но не мешает trigger принимать задания от хостингового бота.
+
+## Figma-визитки
+
+Плагин лежит в `figma_plugin/`. Он читает `content_plan_cards` из AE-ready таблицы и создает или обновляет визитки в Figma.
+
+Шаблон в Figma:
+
+```text
+TS26/VIZITKA_TEMPLATE
+```
+
+Слои внутри шаблона:
+
+```text
+FIO
+POSITION
+PHOTO
+```
+
+Команда `/figma` показывает краткую инструкцию для оператора.
+
+## Проверки перед пушем
+
+Быстрая проверка Python:
 
 ```bash
-./stop_notifications_macos.command
+python3 -m py_compile tg_sheet_monitor.py ae_render_worker.py ae_render_trigger_server.py ae_render_queue.py ae_sheet_source.py ae_render_notify.py ae_render_doctor.py
 ```
 
-## Важно про доступ к таблицам
+Юнит-тесты:
 
-Таблица должна открываться по ссылке хотя бы на чтение. Если Google возвращает HTML вместо TSV, бот сообщит ошибку доступа.
+```bash
+python3 -m unittest discover -s tests
+```
+
+Важно: успешные unit tests не доказывают, что After Effects реально отрендерит проект. Для runtime smoke test нужен открытый проект AE и тестовая плашка через `/render` или `curl`.

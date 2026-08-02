@@ -10,6 +10,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -24,6 +25,10 @@ MAX_FIELD_CHARS = 500
 DEFAULT_LOCK_PATH = Path.home() / "Documents" / "tg_sheet_monitor" / "ae_render_trigger.lock"
 
 _worker_lock = threading.Lock()
+
+
+def log_event(message):
+    print("[trigger] {} {}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), message), flush=True)
 
 
 def is_loopback_host(host):
@@ -171,7 +176,7 @@ class TriggerHandler(BaseHTTPRequestHandler):
     server_version = "TS26AERenderTrigger/1.0"
 
     def log_message(self, format, *args):
-        print("[trigger] " + format % args, flush=True)
+        log_event("{} {}".format(self.client_address[0], format % args))
 
     def send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -210,20 +215,28 @@ class TriggerHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.rstrip("/") in {"/health", ""}:
+            log_event("{} GET {} -> health ok".format(self.client_address[0], self.path))
             self.send_json(200, {"ok": True})
             return
+        log_event("{} GET {} -> 404 not found".format(self.client_address[0], self.path))
         self.send_json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
         if self.path.rstrip("/") != "/render":
+            log_event("{} POST {} -> 404 not found".format(self.client_address[0], self.path))
             self.send_json(404, {"ok": False, "error": "not found"})
             return
         if not self.token_ok():
+            auth = self.headers.get("Authorization", "")
+            token_header = self.headers.get("X-AE-Trigger-Token", "")
+            auth_state = "bearer" if auth.startswith("Bearer ") else ("x-token" if token_header else "missing")
+            log_event("{} POST /render -> 401 bad token ({})".format(self.client_address[0], auth_state))
             self.send_json(401, {"ok": False, "error": "bad token"})
             return
         try:
             payload = self.read_json_body()
         except (ValueError, UnicodeDecodeError) as exc:
+            log_event("{} POST /render -> 400 malformed request: {}".format(self.client_address[0], exc))
             self.send_json(400, {"ok": False, "error": "некорректный запрос: {}".format(exc)})
             return
         # Validate the payload before the AE state check: a malformed request should
@@ -231,30 +244,43 @@ class TriggerHandler(BaseHTTPRequestHandler):
         try:
             validate_payload(payload)
         except ValueError as exc:
+            log_event("{} POST /render -> 400 invalid payload: {}".format(self.client_address[0], exc))
             self.send_json(400, {"ok": False, "error": str(exc)})
             return
         try:
             project_error = ae_render_worker.expected_project_error(self.server.config)
             if project_error:
+                log_event("{} POST /render -> 409 wrong project: {}".format(self.client_address[0], project_error))
                 self.send_json(409, {"ok": False, "error": project_error, "code": "wrong_project"})
                 return
             job, created = enqueue_payload(self.server.config, payload)
         except ValueError as exc:
             # Validation errors are caller-facing and safe to echo back.
+            log_event("{} POST /render -> 400 enqueue rejected: {}".format(self.client_address[0], exc))
             self.send_json(400, {"ok": False, "error": str(exc)})
             return
         except Exception as exc:  # noqa: BLE001 - internal failure, do not leak details
-            print("[trigger] внутренняя ошибка обработки /render: {!r}".format(exc), flush=True)
+            log_event("{} POST /render -> 500 internal error: {!r}".format(self.client_address[0], exc))
             self.send_json(500, {"ok": False, "error": "внутренняя ошибка сервера"})
             return
         try:
             status = queue_status(self.server.config, job.get("id"))
         except Exception as exc:  # noqa: BLE001 - status is best effort
-            print("[trigger] не удалось прочитать статус очереди: {!r}".format(exc), flush=True)
+            log_event("{} POST /render -> status read failed: {!r}".format(self.client_address[0], exc))
             status = {}
         trigger_worker(self.server.config, self.server.retry_interval)
         response = {"ok": True, "status": "queued" if created else "existing", "job_id": job.get("id")}
         response.update(status)
+        log_event(
+            "{} POST /render -> 200 {} job={} payload_name={!r} queue_ahead={} busy={}".format(
+                self.client_address[0],
+                response["status"],
+                job.get("id"),
+                (payload or {}).get("name", ""),
+                response.get("queue_ahead", 0),
+                response.get("renderer_busy", False),
+            )
+        )
         self.send_json(200, response)
 
 
@@ -285,13 +311,13 @@ def main(argv=None):
     config = ae_render_worker.load_config(args.config)
     recovered = ae_render_queue.recover_expired_jobs(config["queue_path"])
     if recovered:
-        print("[trigger] recovered expired jobs: {}".format(len(recovered)), flush=True)
+        log_event("recovered expired jobs: {}".format(len(recovered)))
     server = ThreadingHTTPServer((args.host, args.port), TriggerHandler)
     server.config = config
     server.trigger_token = token
     server.retry_interval = args.retry_interval
     server.singleton_lock_stream = lock_stream
-    print("[trigger] listening on http://{}:{}".format(args.host, args.port), flush=True)
+    log_event("listening on http://{}:{}".format(args.host, args.port))
     server.serve_forever()
 
 

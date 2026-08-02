@@ -81,11 +81,11 @@ class SpreadsheetIdParsingTests(unittest.TestCase):
     """AE_READY_SPREADSHEET_ID is routinely pasted as a full browser URL."""
 
     def test_full_url_is_reduced_to_the_id(self):
-        url = "https://docs.google.com/spreadsheets/d/1--wpJs_8wKO9s_afrcAtoUQG8kvk-vhFgA0KjbmXcTU/edit#gid=0"
-        self.assertEqual(monitor.spreadsheet_id_from_value(url), "1--wpJs_8wKO9s_afrcAtoUQG8kvk-vhFgA0KjbmXcTU")
+        url = "https://docs.google.com/spreadsheets/d/example-spreadsheet-id/edit#gid=0"
+        self.assertEqual(monitor.spreadsheet_id_from_value(url), "example-spreadsheet-id")
 
     def test_bare_id_passes_through(self):
-        self.assertEqual(monitor.spreadsheet_id_from_value("1J6nJHM4wXF66LJO7"), "1J6nJHM4wXF66LJO7")
+        self.assertEqual(monitor.spreadsheet_id_from_value("example-spreadsheet-id"), "example-spreadsheet-id")
 
     def test_empty_value_is_empty(self):
         self.assertEqual(monitor.spreadsheet_id_from_value(""), "")

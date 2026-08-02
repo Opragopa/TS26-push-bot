@@ -13,6 +13,8 @@ import tg_sheet_monitor as monitor
 class HourlyContentPlanTests(unittest.TestCase):
     def setUp(self):
         self.args = types.SimpleNamespace(
+            interval=120,
+            duration=0,
             timeout=10,
             no_telegram=False,
             no_macos_notifications=True,
@@ -33,6 +35,24 @@ class HourlyContentPlanTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(state[monitor.CONTENT_PLAN_DIGEST_STATE_KEY]["last_flush_hour"], "2026-07-22T15")
         send.assert_not_called()
+
+    def test_delivery_failure_is_not_retried_on_every_monitor_tick(self):
+        state = {}
+        monitor.queue_content_plan_change(state, "Контент-план: тестовый diff.")
+        state[monitor.CONTENT_PLAN_DIGEST_STATE_KEY]["last_flush_hour"] = "2026-07-22T14"
+        state[monitor.CONTENT_PLAN_DIGEST_STATE_KEY]["last_attempt_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        moment = dt.datetime(2026, 7, 22, 15, 0, tzinfo=monitor.CONTENT_PLAN_TIME_ZONE)
+        with mock.patch.object(monitor, "send_telegram_chunks_to_chat_ids") as send:
+            changed = monitor.flush_content_plan_digest(self.args, [self.sheet], state, moment=moment)
+        self.assertFalse(changed)
+        send.assert_not_called()
+
+    def test_status_reports_pending_content_plan_delivery(self):
+        state = {}
+        monitor.queue_content_plan_change(state, "Контент-план: тестовый diff.")
+        report = monitor.status_report(self.args, [self.sheet], state)
+        self.assertIn("В очереди: событий 1, строк diff 1.", report)
+        self.assertIn("Последняя отправка: не было.", report)
 
     def test_time_zone_falls_back_to_netherlands_offset_without_tzdata(self):
         with mock.patch.object(monitor, "ZoneInfo", side_effect=monitor.ZoneInfoNotFoundError("No time zone")):

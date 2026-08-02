@@ -1,4 +1,6 @@
 .env
+sheets.json
+ae_render_config.json
 *.log
 *.err.log
 __pycache__/

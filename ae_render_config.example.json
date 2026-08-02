@@ -1,0 +1,67 @@
+{
+  "project_path": "<ABSOLUTE_PATH_TO_AFTER_EFFECTS_PROJECT>.aep",
+  "afterfx_bin": "/Applications/Adobe After Effects 2026/Adobe After Effects 2026.app/Contents/MacOS/After Effects",
+  "afterfx_bundle_id": "com.adobe.AfterEffects.application",
+  "afterfx_launch_method": "osascript_doscript",
+  "reuse_open_project": true,
+  "require_open_project": true,
+  "aerender_bin": "/Applications/Adobe After Effects 2026/aerender",
+  "aerender_working_dir": "/Applications/Adobe After Effects 2026",
+  "google_oauth_user_file": "<PROJECT_DIR>/google_oauth_user.json",
+  "env_file": "<PROJECT_DIR>/.env",
+  "queue_path": "data/ae_render_queue.json",
+  "registry_path": "data/ae_render_registry.json",
+  "temp_project_dir": "/private/tmp/ts26-ae-render",
+  "delete_missing_plaques": "archive",
+  "deleted_plaque_archive_dir": "_Deleted AE",
+  "stale_plaque_archive_dir": "_Stale AE",
+  "respect_existing_render": true,
+  "busy_check_timeout_seconds": 5,
+  "output_module_templates": {
+    "session_topic": "DVX 3 no audio",
+    "plaque": "High Quality with Alpha",
+    "fire_of_meanings": ""
+  },
+  "render_settings_template": "",
+  "prepare_timeout_seconds": 180,
+  "person_plates_script_path": "<ABSOLUTE_PATH_TO_PERSON_PLATES_JSX>",
+  "session_topics_script_path": "<ABSOLUTE_PATH_TO_SESSION_TOPICS_JSX>",
+  "routes": {
+    "session_topics_root": "<LOCAL_SYNC_ROOT>/session_topics",
+    "plaque_output_dir": "<LOCAL_SYNC_ROOT>/plates",
+    "fire_of_meanings_output_dir": "<LOCAL_SYNC_ROOT>/fire_of_meanings"
+  },
+  "templates": {
+    "plaque": {
+      "comp_name": "MASTER-COMP",
+      "name_layer": "Speaker name",
+      "position_layer": "Position",
+      "target_folder_path": "<AE_FOLDER_FOR_PLATES>"
+    },
+    "session_topic": {
+      "comp_pattern": "{shift}_.*Session topics_.*alt",
+      "topic_layer": "TOPIC",
+      "description_layer": "DESCRIPTION",
+      "target_folder_path": "<AE_FOLDER_FOR_SESSION_TOPICS>",
+      "shift_by_day": {
+        "1": "<SHIFT_1>",
+        "2": "<SHIFT_2>",
+        "3": "<SHIFT_3>"
+      }
+    }
+  },
+  "plaque_spreadsheet_id": "<PLAQUE_SPREADSHEET_ID>",
+  "plaque_worksheet_gid": 0,
+  "plaque_start_row": 2,
+  "plaque_name_col": 1,
+  "plaque_position_col": 2,
+  "plaque_note_col": 5,
+  "plaque_ae_id_col": 0,
+  "plaque_note_text": "<-- added via Telegram bot",
+  "ae_ready_spreadsheet_id": "<AE_READY_SPREADSHEET_ID>",
+  "session_topics_auto_render": false,
+  "active_shift": "<ACTIVE_SHIFT>",
+  "ae_ready_state_path": "data/sheet_state.json",
+  "ae_ready_sessions_worksheet": "content_plan_sessions",
+  "shift_by_day": {}
+}
