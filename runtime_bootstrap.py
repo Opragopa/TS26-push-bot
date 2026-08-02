@@ -3,6 +3,7 @@
 """Best-effort dependency bootstrap for minimal bot hosts."""
 
 import importlib
+import importlib.util
 import os
 import subprocess
 import sys
@@ -42,6 +43,9 @@ def ensure_runtime_dependencies():
         "[bootstrap] Missing Python dependencies: {}. Installing requirements.txt...".format(", ".join(missing)),
         flush=True,
     )
+    if importlib.util.find_spec("pip") is None:
+        print("[bootstrap] Python pip is not available. Continuing with stdlib fallbacks when available.", flush=True)
+        return False
     try:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", str(requirements_path)])
     except subprocess.CalledProcessError as exc:

@@ -12,35 +12,31 @@
     button.secondary { background: var(--figma-color-bg-secondary); color: inherit; }
     #status { margin-top: 12px; white-space: pre-wrap; line-height: 1.4; }
     .hint { color: var(--figma-color-text-secondary); line-height: 1.4; }
+    .actions { display: flex; gap: 8px; align-items: center; }
+    .actions button { flex: 1; }
   </style>
 </head>
 <body>
   <h2>TS26: визитки из AE-ready</h2>
   <div class="hint">Откройте файл с шаблоном визитки. Плагин прочитает лист content_plan_cards, покажет проверку и создаст или обновит карточки.</div>
-  <label>TSV-ссылка листа content_plan_cards</label>
-  <input id="url" placeholder="https://docs.google.com/spreadsheets/d/.../export?format=tsv&gid=...">
+  <label>Ссылка на лист content_plan_cards</label>
+  <input id="url" placeholder="Можно обычную ссылку Google Sheets или export?format=tsv">
   <label>Имя шаблона</label>
   <input id="template" value="TS26/VIZITKA_TEMPLATE">
   <label>Зазор между карточками, px</label>
   <input id="gap" type="number" value="80">
   <label>Или вставьте TSV для теста</label>
   <textarea id="tsv" placeholder="person_id\tФИО спикера\tДолжность\tФото на плашку..."></textarea>
-  <button id="preview">Проверить данные</button>
-  <button id="generate" class="secondary" disabled>Создать / обновить</button>
+  <div class="actions">
+    <button id="preview">Проверить актуальные данные</button>
+    <button id="generate" class="secondary" disabled>Создать / обновить</button>
+  </div>
   <div id="status"></div>
   <script>
     let rows = [];
+    let lastSourceHash = '';
     const $ = id => document.getElementById(id);
     const status = text => { $('status').textContent = text; };
-    const parseTsv = text => {
-      const lines = text.replace(/\r/g, '').split('\n').filter(Boolean);
-      if (!lines.length) return [];
-      const headers = lines.shift().split('\t');
-      return lines.map(line => {
-        const cells = line.split('\t');
-        return headers.reduce((row, key, index) => { row[key] = cells[index] || ''; return row; }, {});
-      });
-    };
     const warnings = row => {
       const result = [];
       if (!row['ФИО спикера'] || row['ФИО спикера'].trim().split(/\s+/).length < 2) result.push('проверьте ФИО');
@@ -50,48 +46,35 @@
       return result;
     };
     $('preview').onclick = async () => {
-      try {
-        let text = $('tsv').value.trim();
-        if (!text) {
-          const url = $('url').value.trim();
-          if (!url) throw new Error('Укажите TSV-ссылку или вставьте данные.');
-          const response = await fetch(url);
-          if (!response.ok) throw new Error(`Источник вернул HTTP ${response.status}.`);
-          text = await response.text();
-        }
-        rows = parseTsv(text);
-        if (!rows.length) throw new Error('В TSV нет строк.');
-        const lines = rows.map((row, index) => `${index + 1}. ${row['ФИО спикера'] || 'без ФИО'} — ${row['Должность'] || 'без должности'}${warnings(row).length ? ` [${warnings(row).join(', ')}]` : ''}`);
-        status(`Найдено визиток: ${rows.length}\n\n${lines.join('\n')}\n\nПроверьте список и нажмите «Создать / обновить».`);
-        $('generate').disabled = false;
-      } catch (error) { $('generate').disabled = true; status(`Ошибка: ${error.message || error}`); }
+      $('generate').disabled = true;
+      status('Проверяю данные...');
+      parent.postMessage({ pluginMessage: { type: 'preview', url: $('url').value.trim(), tsv: $('tsv').value.trim() } }, '*');
     };
     $('generate').onclick = () => {
-      const images = {};
-      const loadImages = rows.reduce(async (chain, row) => {
-        await chain;
-        const url = (row['Фото на плашку'] || '').trim();
-        const personId = (row.person_id || row['ФИО спикера'] || '').trim().replace(/\s+/g, '_');
-        if (!url || !personId) return;
-        try {
-          const response = await fetch(url);
-          if (response.ok) images[personId] = Array.from(new Uint8Array(await response.arrayBuffer()));
-        } catch (_) { /* The card will be created with a visible photo warning. */ }
-      }, Promise.resolve());
-      loadImages.then(() => {
-        parent.postMessage({ pluginMessage: { type: 'generate', rows, settings: { templateName: $('template').value.trim(), gap: $('gap').value, images } } }, '*');
-        status('Генерация выполняется...');
-      });
+      parent.postMessage({ pluginMessage: { type: 'generate', rows, settings: { templateName: $('template').value.trim(), gap: $('gap').value } } }, '*');
+      status('Генерация выполняется...');
     };
     onmessage = event => {
       const message = event.data.pluginMessage;
       if (!message) return;
       if (message.type === 'error') status(`Ошибка Figma: ${message.message}`);
+      if (message.type === 'preview-done') {
+        const previousHash = lastSourceHash;
+        lastSourceHash = message.result.sourceHash || '';
+        rows = message.result.rows.map(item => item.row);
+        const changeLine = previousHash && previousHash === lastSourceHash ? 'Изменений с прошлой проверки нет.' : previousHash ? 'Данные изменились с прошлой проверки.' : 'Данные загружены.';
+        const sourceLine = message.result.sourceUrl ? `Источник: ${message.result.sourceUrl}\n` : '';
+        const lines = message.result.rows.map(item => `${item.index}. ${item.row['ФИО спикера'] || 'без ФИО'} — ${item.row['Должность'] || 'без должности'}${item.warnings.length ? ` [${item.warnings.join(', ')}]` : ''}`);
+        status(`${changeLine}\n${sourceLine}Найдено визиток: ${rows.length}\n\n${lines.join('\n')}\n\nПроверьте список и нажмите «Создать / обновить».`);
+        $('generate').disabled = false;
+      }
       if (message.type === 'done') {
         const created = message.result.filter(item => item.created).length;
         const updated = message.result.length - created;
         const problems = message.result.filter(item => item.warnings.length || !item.photo).map(item => `${item.name}: ${[...item.warnings, item.photo ? '' : 'фото не загружено'].filter(Boolean).join(', ')}`);
+        const imageWarnings = message.imageWarnings || [];
         status(`Готово. Создано: ${created}, обновлено: ${updated}.${problems.length ? `\n\nПроверить вручную:\n${problems.join('\n')}` : ''}`);
+        if (imageWarnings.length) status(`${$('status').textContent}\n\nОшибки загрузки фото:\n${imageWarnings.join('\n')}`);
       }
     };
   </script>

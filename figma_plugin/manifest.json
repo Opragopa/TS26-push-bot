@@ -9,9 +9,14 @@
   "networkAccess": {
     "allowedDomains": [
       "https://docs.google.com",
+      "https://*.google.com",
       "https://drive.google.com",
+      "https://*.googleusercontent.com",
+      "https://*.gstatic.com",
       "https://storage.googleapis.com",
       "https://disk.yandex.ru",
+      "https://*.yandex.ru",
+      "https://*.yandex.net",
       "https://downloader.disk.yandex.ru"
     ],
     "reasoning": "Чтение AE-ready TSV и загрузка фотографий для визиток TS26."

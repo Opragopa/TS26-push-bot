@@ -723,15 +723,20 @@ def build_records(rows, corrector=None, confidence_threshold=0.82, position_refe
                 "МОУШЕН_ГОТОВО": "1" if motion_ready else "0",
             }
     badges = list(badges_by_key.values())
-    card_person_ids = {row["person_id"] for row in session_people if row["card_needed"] == "1"}
-    cards = [{
-        "person_id": row["person_id"],
-        "ФИО спикера": row["ФИО спикера"],
-        "Должность": row["Должность"],
-        "Фото на плашку": row["Фото на плашку"],
-        "card_status": "missing_photo" if not row["Фото на плашку"] else "ready",
-        "card_warning": "Нет фото: загрузите фото или создайте черновик" if not row["Фото на плашку"] else "",
-    } for row in people if row["person_id"] in card_person_ids]
+    cards_by_person_id = {}
+    for badge in badges:
+        person_id = badge["person_id"]
+        if person_id in cards_by_person_id:
+            continue
+        cards_by_person_id[person_id] = {
+            "person_id": person_id,
+            "ФИО спикера": badge["ФИО спикера"],
+            "Должность": badge["Должность"],
+            "Фото на плашку": badge["Фото на плашку"],
+            "card_status": "missing_photo" if not badge["Фото на плашку"] else "ready",
+            "card_warning": "Нет фото: загрузите фото или создайте черновик" if not badge["Фото на плашку"] else "",
+        }
+    cards = list(cards_by_person_id.values())
     if ignored_content_cells:
         add_warning(warnings, "warning", "", "Игнорированы ячейки вне строгих площадок B/C/D: {}".format(ignored_content_cells))
     if any(row["card_status"] == "missing_photo" for row in cards):

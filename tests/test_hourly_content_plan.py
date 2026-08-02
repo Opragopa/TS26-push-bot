@@ -161,6 +161,28 @@ class HourlyContentPlanTests(unittest.TestCase):
 
         self.assertEqual(recipients, ["999", "222", "333"])
 
+    def test_load_sheets_accepts_hosting_env_json(self):
+        payload = json.dumps(
+            [
+                {
+                    "label": "План записи",
+                    "url": "https://docs.google.com/spreadsheets/d/test/edit?gid=2",
+                    "range": "U:AM",
+                }
+            ],
+            ensure_ascii=False,
+        )
+        args = types.SimpleNamespace(sheet=[], sheets="missing.json")
+        with mock.patch.dict(os.environ, {"SHEETS_JSON": payload}):
+            sheets = monitor.load_sheets(args)
+        self.assertEqual(sheets, [{"label": "План записи", "url": "https://docs.google.com/spreadsheets/d/test/edit?gid=2", "range": "U:AM"}])
+
+    def test_load_sheets_rejects_invalid_hosting_env_json(self):
+        args = types.SimpleNamespace(sheet=[], sheets="missing.json")
+        with mock.patch.dict(os.environ, {"SHEETS_JSON": "not json"}):
+            with self.assertRaises(monitor.ConfigError):
+                monitor.load_sheets(args)
+
     def test_openai_failure_keeps_full_diff(self):
         state = {}
         original_diff = "Контент-план: строка «10:00», колонка «Зал» - было «пусто», стало «Открытие»."
@@ -275,7 +297,7 @@ class HourlyContentPlanTests(unittest.TestCase):
 
     def test_content_plan_is_queued_but_recording_plan_stays_immediate(self):
         content_sheet = dict(self.sheet)
-        recording_sheet = {"label": "План записи", "url": self.sheet["url"].replace("gid=1", "gid=2")}
+        recording_sheet = {"label": "План записи", "url": self.sheet["url"].replace("gid=1", "gid=2"), "range": "U:AM"}
         current = {"hash": "new", "rows": 1, "bytes": 1, "cells": [["header"], ["value"]]}
         state = {
             monitor.sheet_key(content_sheet): {"hash": "old", "cells": [["header"], ["old"]]},
@@ -283,11 +305,23 @@ class HourlyContentPlanTests(unittest.TestCase):
         }
         queued = []
         notified = []
-        with mock.patch.object(monitor, "fetch_sheet", return_value=dict(current)), mock.patch.object(monitor, "build_change_summary", return_value="diff"), mock.patch.object(monitor, "queue_content_plan_change", side_effect=lambda *_args, **_kwargs: queued.append(True) or 1), mock.patch.object(monitor, "notify", side_effect=lambda *_args, **_kwargs: notified.append(True)):
+        with mock.patch.object(monitor, "fetch_sheet", return_value=dict(current)) as fetch_sheet, mock.patch.object(monitor, "build_change_summary", return_value="diff"), mock.patch.object(monitor, "queue_content_plan_change", side_effect=lambda *_args, **_kwargs: queued.append(True) or 1), mock.patch.object(monitor, "notify", side_effect=lambda *_args, **_kwargs: notified.append(True)):
             monitor.check_sheet(content_sheet, state, self.args)
             monitor.check_sheet(recording_sheet, state, self.args)
+            self.assertEqual(fetch_sheet.call_args_list[1].kwargs["range_name"], "U:AM")
         self.assertEqual(queued, [True])
         self.assertEqual(notified, [True])
+
+    def test_recording_plan_export_url_includes_video_range(self):
+        sheet = {
+            "label": "План записи",
+            "url": "https://docs.google.com/spreadsheets/d/test/edit?gid=1944136331#gid=1944136331",
+            "range": "U:AM",
+        }
+        self.assertEqual(
+            monitor.sheet_key(sheet),
+            "https://docs.google.com/spreadsheets/d/test/export?format=tsv&gid=1944136331&range=U%3AAM",
+        )
 
     def test_current_day_plate_changes_are_separated(self):
         previous = {

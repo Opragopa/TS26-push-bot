@@ -14,6 +14,40 @@ function normalizeRussian(value) {
   return text.replace(/(^|\s)(а|и|в|во|на|но|из|за|по|к|ко|с|со|у|о|об|от|до|для|не|ни)\s+(?=\S)/giu, `$1$2${NBSP}`);
 }
 
+function stringHash(text) {
+  let hash = 2166136261;
+  const value = String(text || "");
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function googleSheetExportUrl(url) {
+  const text = normalize(url);
+  const match = text.match(/docs\.google\.com\/spreadsheets\/d\/([^/]+)/);
+  if (!match) return text;
+  let gid = "0";
+  const gidMatch = text.match(/[?#&]gid=(\d+)/);
+  if (gidMatch) gid = gidMatch[1];
+  if (/\/export\?/.test(text) && /[?&]format=tsv\b/.test(text)) return text;
+  return `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=tsv&gid=${gid}`;
+}
+
+function parseTsv(text) {
+  const lines = String(text || "").replace(/\r/g, "").split("\n").filter(Boolean);
+  if (!lines.length) return [];
+  const headers = lines.shift().split("\t");
+  return lines.map(line => {
+    const cells = line.split("\t");
+    return headers.reduce((row, key, index) => {
+      row[key] = cells[index] || "";
+      return row;
+    }, {});
+  });
+}
+
 function validation(row) {
   const warnings = [];
   const name = normalize(row["ФИО спикера"]);
@@ -23,6 +57,55 @@ function validation(row) {
   if (/\d+\)|^\d+\./.test(name) || /\d+\)|^\d+\./.test(position)) warnings.push("осталась нумерация");
   if (position.length > 180) warnings.push("должность длиннее 180 символов");
   return warnings;
+}
+
+async function fetchText(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Источник вернул HTTP ${response.status}.`);
+  return response.text();
+}
+
+async function previewRows(message) {
+  let text = String(message.tsv || "").trim();
+  let sourceUrl = "";
+  if (!text) {
+    const url = googleSheetExportUrl(message.url);
+    if (!url) throw new Error("Укажите TSV-ссылку или вставьте данные.");
+    sourceUrl = url;
+    text = await fetchText(url);
+  }
+  const rows = parseTsv(text);
+  if (!rows.length) throw new Error("В TSV нет строк.");
+  return {
+    sourceUrl,
+    sourceHash: stringHash(text),
+    rows: rows.map((row, index) => ({
+      row,
+      index: index + 1,
+      warnings: validation(row),
+    })),
+  };
+}
+
+async function loadImages(rows) {
+  const images = {};
+  const warnings = [];
+  for (const row of rows) {
+    const url = normalize(row["Фото на плашку"]);
+    const personId = normalize(row.person_id) || normalize(row["ФИО спикера"]).replace(/\s+/g, "_");
+    if (!url || !personId) continue;
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        warnings.push(`${row["ФИО спикера"] || personId}: фото вернуло HTTP ${response.status}`);
+        continue;
+      }
+      images[personId] = Array.from(new Uint8Array(await response.arrayBuffer()));
+    } catch (error) {
+      warnings.push(`${row["ФИО спикера"] || personId}: фото не загрузилось (${error.message || error})`);
+    }
+  }
+  return { images, warnings };
 }
 
 function textNodes(root) {
@@ -88,6 +171,7 @@ async function generate(rows, settings) {
   const template = templateNode(settings.templateName || DEFAULT_TEMPLATE_NAME);
   if (!template) throw new Error(`Не найден шаблон «${settings.templateName || DEFAULT_TEMPLATE_NAME}» на текущей странице.`);
   const results = [];
+  const generatedNames = [];
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
     const personId = normalize(row.person_id) || normalize(row["ФИО спикера"]).replace(/\s+/g, "_");
@@ -99,18 +183,27 @@ async function generate(rows, settings) {
     if (created) placeCard(card, index, Number(settings.gap) || 80);
     const imageBytes = settings.images && settings.images[personId];
     const result = await fillCard(card, row, imageBytes);
+    generatedNames.push(generatedName);
     results.push({ name: row["ФИО спикера"], created, photo: result.photo, warnings: result.warnings });
   }
-  figma.currentPage.selection = figma.currentPage.findAll(node => results.some(item => node.name === `${settings.outputPrefix || DEFAULT_OUTPUT_PREFIX}${normalize(item.name).replace(/\s+/g, "_")}`));
+  figma.currentPage.selection = figma.currentPage.findAll(node => generatedNames.includes(node.name));
   figma.viewport.scrollAndZoomIntoView(figma.currentPage.selection);
   return results;
 }
 
 figma.ui.onmessage = async message => {
-  if (message.type !== "generate") return;
   try {
-    const result = await generate(message.rows || [], message.settings || {});
-    figma.ui.postMessage({ type: "done", result });
+    if (message.type === "preview") {
+      const result = await previewRows(message);
+      figma.ui.postMessage({ type: "preview-done", result });
+      return;
+    }
+    if (message.type === "generate") {
+      const rows = message.rows || [];
+      const loaded = await loadImages(rows);
+      const result = await generate(rows, { ...(message.settings || {}), images: loaded.images });
+      figma.ui.postMessage({ type: "done", result, imageWarnings: loaded.warnings });
+    }
   } catch (error) {
     figma.ui.postMessage({ type: "error", message: error.message || String(error) });
   }

@@ -87,6 +87,14 @@ python3 tg_sheet_monitor.py --notify-initial
 
 На хостинге бот должен запускаться через `python main.py`. В репозитории есть `Dockerfile`; AE JSX-файлы в корне оставлены как совместимые лаунчеры, чтобы старые настройки хостинга не запускали JSX вместо Python.
 
+Если хостинг деплоит только git-репозиторий, локальный `sheets.json` туда не попадет. В этом случае задайте переменную окружения `SHEETS_JSON`:
+
+```json
+[{"label":"Контент-план","url":"https://docs.google.com/spreadsheets/d/<CONTENT_PLAN_SPREADSHEET_ID>/edit?gid=<WORKSHEET_GID>","extra_chat_ids":[]},{"label":"План записи","url":"https://docs.google.com/spreadsheets/d/<RECORDING_PLAN_SPREADSHEET_ID>/edit?gid=<WORKSHEET_GID>","range":"U:AM"}]
+```
+
+`range: "U:AM"` ограничивает монитор `План записи` только видео-блоком.
+
 ## Переменные окружения бота
 
 Минимум для Telegram:

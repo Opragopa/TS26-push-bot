@@ -102,6 +102,18 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(records["badges"][0]["ФИО спикера"], "Памфилова Элла Александровна")
         self.assertIn("Председатель Центральной избирательной комиссии Российской Федерации", records["badges"][0]["Должность"])
 
+    def test_cards_are_created_for_every_badge_person(self):
+        sample_tsv = """ВРЕМЯ\tАмфитеатр\tУРАЛ 1\tУРАЛ 2
+ДЕНЬ 1  ·  20.07  ·  [ТЕМА: Тест]
+17:30-19:00\tГлавная встреча Тема: «Тест» Спикер: Иванов Иван, директор\t\t
+"""
+        records = ae_content_plan.build_records(ae_content_plan.parse_table_rows(sample_tsv), corrector=None)
+
+        self.assertEqual(len(records["badges"]), 1)
+        self.assertEqual(len(records["cards"]), 1)
+        self.assertEqual(records["cards"][0]["person_id"], records["badges"][0]["person_id"])
+        self.assertEqual(records["cards"][0]["ФИО спикера"], "Иванов Иван")
+
     def test_reference_position_is_authoritative(self):
         sample_tsv = """ВРЕМЯ\tАмфитеатр\tУРАЛ 1\tУРАЛ 2
 ДЕНЬ 1 · 20.07 · [ТЕМА: Тест]

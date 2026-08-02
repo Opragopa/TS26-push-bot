@@ -233,7 +233,7 @@ def normalize_header(value):
     return normalize_space(value).casefold()
 
 
-def google_sheet_export_url(url):
+def google_sheet_export_url(url, range_name=""):
     text = str(url).strip()
     parsed = urllib.parse.urlparse(text)
     if "docs.google.com" not in parsed.netloc or "/spreadsheets/d/" not in parsed.path:
@@ -251,7 +251,13 @@ def google_sheet_export_url(url):
             gid = frag_match.group(1)
     if not gid:
         gid = "0"
-    return "https://docs.google.com/spreadsheets/d/{}/export?format=tsv&gid={}".format(match.group(1), gid)
+    query_params = {"format": "tsv", "gid": gid}
+    if str(range_name or "").strip():
+        query_params["range"] = str(range_name).strip()
+    return "https://docs.google.com/spreadsheets/d/{}/export?{}".format(
+        match.group(1),
+        urllib.parse.urlencode(query_params),
+    )
 
 
 def count_rows(text):
@@ -263,8 +269,8 @@ def parse_tsv(text):
     return list(csv.reader(text.splitlines(), delimiter="\t"))
 
 
-def fetch_sheet(url, timeout):
-    export_url = google_sheet_export_url(url)
+def fetch_sheet(url, timeout, range_name=""):
+    export_url = google_sheet_export_url(url, range_name=range_name)
     request = urllib.request.Request(export_url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -394,6 +400,8 @@ def normalize_sheet_config(item, index):
     if not isinstance(item, dict) or not item.get("url"):
         raise ConfigError("В sheets.json запись #{} должна содержать url.".format(index))
     clean = {"label": item.get("label") or item["url"], "url": item["url"]}
+    if str(item.get("range") or "").strip():
+        clean["range"] = str(item.get("range")).strip()
     if "chat_ids" in item:
         clean["chat_ids"] = [str(chat_id).strip() for chat_id in item.get("chat_ids") or [] if str(chat_id).strip()]
     if "extra_chat_ids" in item:
@@ -402,6 +410,15 @@ def normalize_sheet_config(item, index):
 
 
 def load_sheets(args):
+    env_sheets = os.environ.get("SHEETS_JSON", "").strip()
+    if env_sheets:
+        try:
+            sheets = json.loads(env_sheets)
+        except ValueError as exc:
+            raise ConfigError("SHEETS_JSON не похож на JSON: {}".format(exc))
+        if not isinstance(sheets, list):
+            raise ConfigError("SHEETS_JSON должен быть JSON-массивом таблиц.")
+        return [normalize_sheet_config(item, index) for index, item in enumerate(sheets, 1)]
     if args.sheet:
         return [parse_sheet_arg(item) for item in args.sheet]
     sheets = load_json(Path(args.sheets).expanduser(), [])
@@ -411,7 +428,7 @@ def load_sheets(args):
 
 
 def sheet_key(sheet):
-    return google_sheet_export_url(sheet["url"])
+    return google_sheet_export_url(sheet["url"], range_name=sheet.get("range", ""))
 
 
 def telegram_request(token, method, payload, timeout):
@@ -3757,7 +3774,7 @@ def check_sheet(sheet, state, args):
     key = sheet_key(sheet)
     label = sheet["label"]
     previous = state.get(key, {})
-    current = fetch_sheet(sheet["url"], args.timeout)
+    current = fetch_sheet(sheet["url"], args.timeout, range_name=sheet.get("range", ""))
     current.update({
         "label": label,
         "url": sheet["url"],
