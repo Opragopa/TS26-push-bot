@@ -235,6 +235,8 @@ def normalize_header(value):
 
 def google_sheet_export_url(url, range_name=""):
     text = str(url).strip()
+    if not text:
+        raise MonitorError("пустая ссылка Google Sheets")
     parsed = urllib.parse.urlparse(text)
     if "docs.google.com" not in parsed.netloc or "/spreadsheets/d/" not in parsed.path:
         return text
@@ -392,14 +394,25 @@ def acquire_state_lock(path):
 def parse_sheet_arg(value):
     if "=" in value:
         label, url = value.split("=", 1)
-        return {"label": label.strip() or url.strip(), "url": url.strip()}
-    return {"label": value.strip(), "url": value.strip()}
+        clean_url = clean_sheet_url(url)
+        return {"label": label.strip() or clean_url, "url": clean_url}
+    clean_url = clean_sheet_url(value)
+    return {"label": clean_url, "url": clean_url}
+
+
+def clean_sheet_url(value):
+    text = str(value or "").strip()
+    markdown = re.match(r"^\[\s*(https?://[^\]]+)\s*\]\(\s*(https?://[^)]+)\s*\)$", text)
+    if markdown:
+        return markdown.group(2).strip()
+    return text
 
 
 def normalize_sheet_config(item, index):
     if not isinstance(item, dict) or not item.get("url"):
         raise ConfigError("В sheets.json запись #{} должна содержать url.".format(index))
-    clean = {"label": item.get("label") or item["url"], "url": item["url"]}
+    clean_url = clean_sheet_url(item["url"])
+    clean = {"label": item.get("label") or clean_url, "url": clean_url}
     if str(item.get("range") or "").strip():
         clean["range"] = str(item.get("range")).strip()
     if "chat_ids" in item:
@@ -2961,13 +2974,18 @@ def sync_ae_ready_badges_to_motion_sheet(records):
 
 def run_ae_ready_sync(args, state, force=False, rebuild=False):
     source_url = ae_ready_source_url(state)
+    if not source_url:
+        raise ConfigError("AE_READY_SOURCE_URL не задан. Укажите ссылку на исходный Контент-план или отключите AE_READY_SYNC_ENABLED.")
     source_sheet = {"label": "Контент-план", "url": source_url}
     current = fetch_sheet(source_url, args.timeout)
-    reference_sheet = fetch_sheet(AE_POSITION_REFERENCE_URL, args.timeout)
+    if str(AE_POSITION_REFERENCE_URL or "").strip():
+        reference_sheet = fetch_sheet(AE_POSITION_REFERENCE_URL, args.timeout)
+    else:
+        reference_sheet = {"hash": "", "cells": [], "rows": 0, "bytes": 0}
     data = ae_ready_state(state)
     if not force and data.get("source_hash") == current["hash"] and data.get("reference_hash") == reference_sheet["hash"]:
         return {"changed": False, "message": "AE-ready таблица уже актуальна.", "spreadsheet_id": ae_ready_spreadsheet_id(state)}
-    position_reference = position_reference_from_sheet(reference_sheet)
+    position_reference = position_reference_from_sheet(reference_sheet) if str(AE_POSITION_REFERENCE_URL or "").strip() else {}
     corrector = build_ae_llm_corrector(args)
     records = ae_content_plan.build_records(
         current["cells"],

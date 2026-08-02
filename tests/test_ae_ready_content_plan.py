@@ -237,10 +237,10 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(records["badges"][0]["МОУШЕН_ГОТОВО"], "0")
 
     def test_sync_skips_when_source_hash_unchanged(self):
-        state = {monitor.AE_READY_STATE_KEY: {"source_hash": "same", "reference_hash": "same-reference", "spreadsheet_id": "ae123"}}
+        state = {monitor.AE_READY_STATE_KEY: {"source_url": "https://docs.google.com/spreadsheets/d/source/edit?gid=1", "source_hash": "same", "reference_hash": "same-reference", "spreadsheet_id": "ae123"}}
         source = {"hash": "same", "cells": [], "rows": 0, "bytes": 0}
         reference = {"hash": "same-reference", "cells": [], "rows": 0, "bytes": 0}
-        with mock.patch.object(monitor, "fetch_sheet", side_effect=[source, reference]), mock.patch.object(monitor, "get_google_client") as google:
+        with mock.patch.object(monitor, "AE_POSITION_REFERENCE_URL", "https://docs.google.com/spreadsheets/d/reference/edit?gid=1"), mock.patch.object(monitor, "fetch_sheet", side_effect=[source, reference]), mock.patch.object(monitor, "get_google_client") as google:
             result = monitor.run_ae_ready_sync(self.args, state, force=False)
 
         self.assertFalse(result["changed"])
@@ -251,9 +251,9 @@ class AEReadyContentPlanTests(unittest.TestCase):
         rows = ae_content_plan.parse_table_rows(SAMPLE_TSV)
         current = {"hash": "same-source", "cells": rows, "rows": len(rows), "bytes": len(SAMPLE_TSV)}
         reference = {"hash": "new-reference", "cells": [["№", "ФИО спикера", "Должность"], ["1", "Иванов Иван", "Согласованная должность"]]}
-        state = {monitor.AE_READY_STATE_KEY: {"source_hash": "same-source", "reference_hash": "old-reference", "spreadsheet_id": "ae123"}}
+        state = {monitor.AE_READY_STATE_KEY: {"source_url": "https://docs.google.com/spreadsheets/d/source/edit?gid=1", "source_hash": "same-source", "reference_hash": "old-reference", "spreadsheet_id": "ae123"}}
 
-        with mock.patch.object(monitor, "fetch_sheet", side_effect=[current, reference]), mock.patch.object(monitor, "get_google_client", return_value=client), mock.patch.object(monitor, "build_ae_llm_corrector", return_value=None), mock.patch.object(monitor, "sync_ae_ready_badges_to_motion_sheet", return_value={"synced": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}):
+        with mock.patch.object(monitor, "AE_POSITION_REFERENCE_URL", "https://docs.google.com/spreadsheets/d/reference/edit?gid=1"), mock.patch.object(monitor, "fetch_sheet", side_effect=[current, reference]), mock.patch.object(monitor, "get_google_client", return_value=client), mock.patch.object(monitor, "build_ae_llm_corrector", return_value=None), mock.patch.object(monitor, "sync_ae_ready_badges_to_motion_sheet", return_value={"synced": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}):
             result = monitor.run_ae_ready_sync(self.args, state, force=False)
 
         self.assertTrue(result["changed"])
@@ -261,7 +261,7 @@ class AEReadyContentPlanTests(unittest.TestCase):
 
     def test_sync_creates_private_sheet_and_writes_tabs(self):
         client = FakeClient()
-        state = {}
+        state = {monitor.AE_READY_STATE_KEY: {"source_url": "https://docs.google.com/spreadsheets/d/source/edit?gid=1"}}
         rows = ae_content_plan.parse_table_rows(SAMPLE_TSV)
         current = {"hash": "newhash", "cells": rows, "rows": len(rows), "bytes": len(SAMPLE_TSV)}
 
@@ -277,9 +277,22 @@ class AEReadyContentPlanTests(unittest.TestCase):
         self.assertEqual(sessions_values[0], ae_content_plan.LEGACY_SESSION_FIELDS)
         self.assertEqual(client.created, [monitor.AE_READY_SPREADSHEET_TITLE])
 
+    def test_sync_does_not_require_position_reference_url(self):
+        client = FakeClient()
+        state = {monitor.AE_READY_STATE_KEY: {"source_url": "https://docs.google.com/spreadsheets/d/source/edit?gid=1"}}
+        rows = ae_content_plan.parse_table_rows(SAMPLE_TSV)
+        current = {"hash": "newhash", "cells": rows, "rows": len(rows), "bytes": len(SAMPLE_TSV)}
+
+        with mock.patch.object(monitor, "AE_POSITION_REFERENCE_URL", ""), mock.patch.object(monitor, "fetch_sheet", return_value=current) as fetch_sheet, mock.patch.object(monitor, "get_google_client", return_value=client), mock.patch.object(monitor, "build_ae_llm_corrector", return_value=None), mock.patch.object(monitor, "sync_ae_ready_badges_to_motion_sheet", return_value={"synced": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}):
+            result = monitor.run_ae_ready_sync(self.args, state, force=True)
+
+        self.assertTrue(result["changed"])
+        fetch_sheet.assert_called_once_with("https://docs.google.com/spreadsheets/d/source/edit?gid=1", self.args.timeout)
+        self.assertEqual(state[monitor.AE_READY_STATE_KEY]["reference_hash"], "")
+
     def test_ae_ready_sync_does_not_enqueue_session_topics_by_default(self):
         client = FakeClient()
-        state = {}
+        state = {monitor.AE_READY_STATE_KEY: {"source_url": "https://docs.google.com/spreadsheets/d/source/edit?gid=1"}}
         rows = ae_content_plan.parse_table_rows(SAMPLE_TSV)
         current = {"hash": "newhash", "cells": rows, "rows": len(rows), "bytes": len(SAMPLE_TSV)}
         reference = {"hash": "reference", "cells": [["ФИО спикера", "Должность"]]}

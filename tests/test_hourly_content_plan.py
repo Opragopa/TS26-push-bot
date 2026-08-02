@@ -177,6 +177,21 @@ class HourlyContentPlanTests(unittest.TestCase):
             sheets = monitor.load_sheets(args)
         self.assertEqual(sheets, [{"label": "План записи", "url": "https://docs.google.com/spreadsheets/d/test/edit?gid=2", "range": "U:AM"}])
 
+    def test_load_sheets_cleans_accidental_markdown_url(self):
+        payload = json.dumps(
+            [
+                {
+                    "label": "План записи",
+                    "url": "[https://docs.google.com/spreadsheets/d/test/edit?gid=2](https://docs.google.com/spreadsheets/d/test/edit?gid=2)",
+                }
+            ],
+            ensure_ascii=False,
+        )
+        args = types.SimpleNamespace(sheet=[], sheets="missing.json")
+        with mock.patch.dict(os.environ, {"SHEETS_JSON": payload}):
+            sheets = monitor.load_sheets(args)
+        self.assertEqual(sheets[0]["url"], "https://docs.google.com/spreadsheets/d/test/edit?gid=2")
+
     def test_load_sheets_rejects_invalid_hosting_env_json(self):
         args = types.SimpleNamespace(sheet=[], sheets="missing.json")
         with mock.patch.dict(os.environ, {"SHEETS_JSON": "not json"}):
