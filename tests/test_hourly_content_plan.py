@@ -198,6 +198,14 @@ class HourlyContentPlanTests(unittest.TestCase):
             with self.assertRaises(monitor.ConfigError):
                 monitor.load_sheets(args)
 
+    def test_hourly_ae_ready_sync_catches_value_error(self):
+        state = {}
+        with mock.patch.object(monitor, "run_ae_ready_sync", side_effect=ValueError("unknown url type: ''")):
+            result = monitor.maybe_hourly_ae_ready_sync(self.args, [self.sheet], state, moment=dt.datetime(2026, 8, 2, 19, 0, tzinfo=monitor.CONTENT_PLAN_TIME_ZONE))
+
+        self.assertTrue(result)
+        self.assertIn("unknown url type", state[monitor.AE_READY_STATE_KEY]["last_error"])
+
     def test_openai_failure_keeps_full_diff(self):
         state = {}
         original_diff = "Контент-план: строка «10:00», колонка «Зал» - было «пусто», стало «Открытие»."

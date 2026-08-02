@@ -314,7 +314,7 @@ class AEReadyContentPlanTests(unittest.TestCase):
 
         worksheet = mock.Mock()
         worksheet.get_all_values.return_value = []
-        with mock.patch.object(monitor, "get_plaque_worksheet", return_value=worksheet), mock.patch.object(monitor, "write_plaque_to_sheet", return_value={"action": "created", "row": 280}) as write:
+        with mock.patch.object(monitor, "PLAQUE_SPREADSHEET_ID", "plaque-sheet"), mock.patch.object(monitor, "get_plaque_worksheet", return_value=worksheet), mock.patch.object(monitor, "write_plaque_to_sheet", return_value={"action": "created", "row": 280}) as write:
             result = monitor.sync_ae_ready_badges_to_motion_sheet(records)
 
         self.assertEqual(result["synced"], 1)
@@ -328,6 +328,20 @@ class AEReadyContentPlanTests(unittest.TestCase):
             values=mock.ANY,
             verify=False,
         )
+
+    def test_ae_ready_motion_sync_skips_when_plaque_spreadsheet_is_missing(self):
+        records = {
+            "badges": [
+                {"ФИО спикера": "Иванов Иван", "Должность": "Директор", "ДОСТОВЕРНОСТЬ": "0.95", "МОУШЕН_ГОТОВО": "1"},
+            ]
+        }
+        with mock.patch.object(monitor, "PLAQUE_SPREADSHEET_ID", ""), mock.patch.object(monitor, "get_plaque_worksheet") as get_worksheet:
+            result = monitor.sync_ae_ready_badges_to_motion_sheet(records)
+
+        self.assertEqual(result["synced"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertIn("PLAQUE_SPREADSHEET_ID не задан", result["errors"][0])
+        get_worksheet.assert_not_called()
 
     def test_state_source_url_overrides_env_default(self):
         state = {monitor.AE_READY_STATE_KEY: {"source_url": "https://docs.google.com/spreadsheets/d/custom/edit?gid=1"}}

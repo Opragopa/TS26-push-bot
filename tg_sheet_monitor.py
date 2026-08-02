@@ -2914,6 +2914,10 @@ def sync_ae_ready_badges_to_motion_sheet(records):
     if not AE_READY_PLAQUE_SYNC_ENABLED:
         result["skipped"] = len(badges)
         return result
+    if not str(PLAQUE_SPREADSHEET_ID or "").strip():
+        result["skipped"] = len(badges)
+        result["errors"].append("PLAQUE_SPREADSHEET_ID не задан: перенос плашек в МОУШЕН пропущен.")
+        return result
 
     selected = {}
     for badge in badges:
@@ -3050,7 +3054,7 @@ def maybe_hourly_ae_ready_sync(args, sheets, state, moment=None):
             for admin_id in admin_chat_ids():
                 send_plain_chat_message(args, admin_id, "TS26: AE-ready обновлена", "{}\n{}".format(result["message"], ae_ready_url(result.get("spreadsheet_id"))))
         return True
-    except (MonitorError, ConfigError, ae_content_plan.AEContentPlanError) as exc:
+    except (MonitorError, ConfigError, ValueError, ae_content_plan.AEContentPlanError) as exc:
         data["last_auto_sync_hour"] = current_hour
         data["last_error"] = str(exc)
         log("AE-ready hourly sync не выполнен: {}".format(exc))
@@ -3058,6 +3062,8 @@ def maybe_hourly_ae_ready_sync(args, sheets, state, moment=None):
 
 
 def get_plaque_worksheet():
+    if not str(PLAQUE_SPREADSHEET_ID or "").strip():
+        raise ConfigError("PLAQUE_SPREADSHEET_ID не задан.")
     client = get_google_client()
     spreadsheet = run_google_action("Не удалось открыть таблицу для плашек", lambda: client.open_by_key(PLAQUE_SPREADSHEET_ID))
     worksheets = run_google_action("Не удалось получить список листов", spreadsheet.worksheets)
