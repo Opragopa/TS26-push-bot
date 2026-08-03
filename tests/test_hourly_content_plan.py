@@ -60,6 +60,41 @@ class HourlyContentPlanTests(unittest.TestCase):
         self.assertEqual(timezone.utcoffset(None), dt.timedelta(hours=1))
         self.assertEqual(timezone.tzname(None), "Europe/Amsterdam")
 
+    def test_runtime_config_refreshes_after_dotenv_load(self):
+        original_values = {
+            "PLAQUE_SPREADSHEET_ID": monitor.PLAQUE_SPREADSHEET_ID,
+            "PLAQUE_WORKSHEET_GID": monitor.PLAQUE_WORKSHEET_GID,
+            "PLAQUE_START_ROW": monitor.PLAQUE_START_ROW,
+            "PLAQUE_NAME_COL": monitor.PLAQUE_NAME_COL,
+            "PLAQUE_POSITION_COL": monitor.PLAQUE_POSITION_COL,
+            "PLAQUE_NOTE_COL": monitor.PLAQUE_NOTE_COL,
+        }
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as env_file:
+            env_file.write(
+                "\n".join(
+                    [
+                        "PLAQUE_SPREADSHEET_ID=sheet-from-env",
+                        "PLAQUE_WORKSHEET_GID=1399617264",
+                        "PLAQUE_START_ROW=280",
+                        "PLAQUE_NAME_COL=1",
+                        "PLAQUE_POSITION_COL=2",
+                        "PLAQUE_NOTE_COL=5",
+                    ]
+                )
+            )
+            env_file.flush()
+            with mock.patch.dict(os.environ, {}, clear=True):
+                try:
+                    monitor.PLAQUE_SPREADSHEET_ID = ""
+                    monitor.load_dotenv(env_file.name)
+                    monitor.refresh_runtime_config_from_env()
+                    self.assertEqual(monitor.PLAQUE_SPREADSHEET_ID, "sheet-from-env")
+                    self.assertEqual(monitor.PLAQUE_WORKSHEET_GID, 1399617264)
+                    self.assertEqual(monitor.PLAQUE_START_ROW, 280)
+                finally:
+                    for key, value in original_values.items():
+                        setattr(monitor, key, value)
+
     def test_google_client_falls_back_to_rest_for_oauth_without_gspread(self):
         old_oauth = os.environ.get("GOOGLE_OAUTH_USER_JSON")
         old_service = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")

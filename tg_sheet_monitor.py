@@ -202,6 +202,50 @@ def load_dotenv(path):
                 os.environ[key] = value
 
 
+def refresh_runtime_config_from_env():
+    """Refresh module-level settings after .env has been loaded."""
+    global AE_READY_SOURCE_URL
+    global AE_POSITION_REFERENCE_URL
+    global AE_READY_SPREADSHEET_TITLE
+    global AE_READY_CONFIDENCE_THRESHOLD
+    global AE_READY_PLAQUE_SYNC_ENABLED
+    global AE_READY_PLAQUE_CONFIDENCE_THRESHOLD
+    global AE_READY_PLAQUE_NOTE_TEXT
+    global PLAQUE_SPREADSHEET_ID
+    global PLAQUE_WORKSHEET_GID
+    global PLAQUE_WORKSHEET_TITLE
+    global PLAQUE_START_ROW
+    global PLAQUE_NAME_COL
+    global PLAQUE_POSITION_COL
+    global PLAQUE_NOTE_COL
+    global PLAQUE_NOTE_TEXT
+    global AE_RENDER_ENABLED
+    global AE_RENDER_TRIGGER_URL
+    global AE_RENDER_TRIGGER_TOKEN
+    global AE_RENDER_QUEUE_PATH
+
+    AE_READY_SOURCE_URL = os.environ.get("AE_READY_SOURCE_URL", "")
+    AE_POSITION_REFERENCE_URL = os.environ.get("AE_POSITION_REFERENCE_URL", "")
+    AE_READY_SPREADSHEET_TITLE = os.environ.get("AE_READY_SPREADSHEET_TITLE", "TS26 AE-ready Content Plan")
+    AE_READY_CONFIDENCE_THRESHOLD = env_float("AI_CORRECTION_CONFIDENCE_THRESHOLD", 0.82)
+    AE_READY_PLAQUE_SYNC_ENABLED = env_bool("AE_READY_PLAQUE_SYNC_ENABLED", True)
+    AE_READY_PLAQUE_CONFIDENCE_THRESHOLD = env_float("AE_READY_PLAQUE_CONFIDENCE_THRESHOLD", 0.9)
+    AE_READY_PLAQUE_NOTE_TEXT = os.environ.get("AE_READY_PLAQUE_NOTE_TEXT", "<-- добавлено из AE-ready")
+    PLAQUE_SPREADSHEET_ID = os.environ.get("PLAQUE_SPREADSHEET_ID", "")
+    PLAQUE_WORKSHEET_GID = env_int("PLAQUE_WORKSHEET_GID", 0)
+    PLAQUE_WORKSHEET_TITLE = os.environ.get("PLAQUE_WORKSHEET_TITLE", "МОУШЕН")
+    PLAQUE_START_ROW = env_int("PLAQUE_START_ROW", 280)
+    PLAQUE_NAME_COL = env_int("PLAQUE_NAME_COL", 1)
+    PLAQUE_POSITION_COL = env_int("PLAQUE_POSITION_COL", 2)
+    PLAQUE_NOTE_COL = env_int("PLAQUE_NOTE_COL", 5)
+    PLAQUE_NOTE_TEXT = os.environ.get("PLAQUE_NOTE_TEXT", "<-- добавлено через ТГ бота")
+    AE_RENDER_ENABLED = env_bool("AE_RENDER_ENABLED", True)
+    AE_RENDER_TRIGGER_URL = os.environ.get("AE_RENDER_TRIGGER_URL", "").strip()
+    AE_RENDER_TRIGGER_TOKEN = os.environ.get("AE_RENDER_TRIGGER_TOKEN", "").strip()
+    ae_render_queue_value = Path(os.environ.get("AE_RENDER_QUEUE_PATH", "data/ae_render_queue.json")).expanduser()
+    AE_RENDER_QUEUE_PATH = ae_render_queue_value if ae_render_queue_value.is_absolute() else Path(__file__).resolve().parent / ae_render_queue_value
+
+
 def split_env_list(value):
     return [item.strip() for item in re.split(r"[,;\s]+", str(value or "")) if item.strip()]
 
@@ -3899,6 +3943,7 @@ def main(argv=None):
         args.no_telegram = True
         args.no_macos_notifications = True
     load_dotenv(args.env)
+    refresh_runtime_config_from_env()
     if args.print_chat_ids:
         print_chat_ids(args)
         return
